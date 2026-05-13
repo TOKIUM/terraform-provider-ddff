@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a bug in the provider.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. Please fill out
+        the sections below so we can reproduce the issue quickly.
+
+  - type: input
+    id: provider-version
+    attributes:
+      label: Provider version
+      description: Output of `terraform -version` includes the provider version.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: terraform-version
+    attributes:
+      label: Terraform version
+      placeholder: "1.10.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: tf-config
+    attributes:
+      label: Terraform configuration
+      description: A minimal HCL snippet that reproduces the issue.
+      render: hcl
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the exact error message or unexpected output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: |
+        Set `TF_LOG=DEBUG` and re-run the failing command. Paste the
+        relevant portion of the output here, redacting any secrets.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

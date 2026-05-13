@@ -1,23 +1,22 @@
 # terraform-provider-datadog-feature-flags
 
-> **Status:** Private development. Will be open-sourced when stable.
+[![Release](https://img.shields.io/github/v/release/TOKIUM/terraform-provider-datadog-feature-flags?include_prereleases&sort=semver)](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-An unofficial Terraform provider for [Datadog Feature Flags](https://docs.datadoghq.com/feature_flags/).
-Manages feature flags, environments, allocations (targeting rules), and exposure schedules
-via the Datadog REST API.
+A community Terraform provider for [Datadog Feature Flags](https://docs.datadoghq.com/feature_flags/).
+It manages feature flags, environments, per-environment enablement, and
+targeting allocations through the Datadog Feature Flags v2 REST API.
 
-**Disclaimer:** This project is not affiliated with, endorsed by, or sponsored by
-Datadog, Inc. "Datadog" is a registered trademark of Datadog, Inc. This provider
-is maintained independently and uses the publicly documented Datadog REST API.
+> **Disclaimer**
+> This project is not affiliated with, endorsed by, or sponsored by Datadog, Inc.
+> "Datadog" is a registered trademark of Datadog, Inc. The provider is
+> maintained independently and uses the publicly documented Datadog REST API.
 
-## Status
-
-Pre-1.0. Breaking changes are possible until v1.0.0.
-
-## Usage (preview)
+## Installation
 
 ```hcl
 terraform {
+  required_version = ">= 1.8"
   required_providers {
     ddff = {
       source  = "TOKIUM/datadog-feature-flags"
@@ -27,48 +26,99 @@ terraform {
 }
 
 provider "ddff" {
-  # Credentials read from DD_API_KEY / DD_APP_KEY environment variables by default
-  # (DATADOG_API_KEY / DATADOG_APP_KEY are honored as a secondary fallback, matching
-  # the official DataDog/datadog provider's convention).
-  # api_key = var.dd_api_key
-  # app_key = var.dd_app_key
-  # api_url = "https://api.datadoghq.com"  # or DD_HOST / DATADOG_HOST
-}
-
-resource "ddff_feature_flag" "new_checkout" {
-  key         = "new_checkout_flow"
-  name        = "New checkout flow"
-  description = "Enables the redesigned checkout flow."
+  # api_key, app_key, api_url fall back to DD_API_KEY / DD_APP_KEY / DD_HOST
+  # (or DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_HOST) environment
+  # variables. The precedence matches the official DataDog/datadog provider.
 }
 ```
 
-## Installation (private phase)
-
-While the provider is private, install via `scripts/install.sh` which downloads
-the binary from a GitHub Release and places it in the local filesystem mirror.
-Configure `~/.terraformrc`:
+## Quick start
 
 ```hcl
-provider_installation {
-  filesystem_mirror {
-    path    = "/home/USER/.terraform.d/plugins-mirror"
-    include = ["registry.terraform.io/TOKIUM/*"]
+resource "ddff_feature_flag" "new_checkout" {
+  key                 = "new_checkout_flow"
+  name                = "New checkout flow"
+  description         = "Enables the redesigned checkout flow."
+  value_type          = "BOOLEAN"
+  default_variant_key = "off"
+
+  variants {
+    key   = "on"
+    name  = "On"
+    value = "true"
   }
-  direct {
-    exclude = ["registry.terraform.io/TOKIUM/*"]
+
+  variants {
+    key   = "off"
+    name  = "Off"
+    value = "false"
   }
 }
 ```
 
-## Development
+For complete examples, see [`examples/`](./examples) and the documentation
+on the [Terraform Registry](https://registry.terraform.io/providers/TOKIUM/datadog-feature-flags/latest).
 
-- Go 1.23+
-- Terraform 1.8+
+## Resources
 
-```bash
-go build .
-```
+| Resource | Purpose |
+| --- | --- |
+| `ddff_feature_flag` | Define a feature flag, its value type, and its variants. |
+| `ddff_environment` | Manage feature flag environments (dev/staging/prod, custom scopes). |
+| `ddff_feature_flag_environment` | Enable or disable a flag in a specific environment. |
+| `ddff_allocation` | Define targeting rules and variant weight distribution for a flag in an environment. |
+
+## Data sources
+
+| Data source | Purpose |
+| --- | --- |
+| `data.ddff_feature_flag` | Look up an existing feature flag by key. |
+| `data.ddff_environment` | Look up an existing environment by key. |
+
+## Provider configuration
+
+| Attribute | Environment variables (in order) | Description |
+| --- | --- | --- |
+| `api_key` | `DD_API_KEY`, `DATADOG_API_KEY` | Datadog API key. |
+| `app_key` | `DD_APP_KEY`, `DATADOG_APP_KEY` | Datadog application key. |
+| `api_url` | `DD_HOST`, `DATADOG_HOST` | Full Datadog API URL. Defaults to `https://api.datadoghq.com`. |
+
+The provider does not persist credentials; they are read at apply time only.
+
+## Known behavior
+
+- **Archive on destroy** — The Datadog API has no physical delete for feature
+  flags, so `terraform destroy` archives the flag. Re-applying a previously
+  destroyed configuration creates a brand-new flag with a fresh UUID; the
+  archived flag remains visible in the Datadog UI.
+- **`default_variant_key` is write-only at the flag level** — Datadog stores
+  the effective default per environment, not on the flag itself. The
+  provider preserves whatever value you set in HCL; UI-side changes to the
+  per-environment default are not detected as drift on the
+  `ddff_feature_flag` resource.
+- **`json_schema` uses semantic JSON equality** — The API reformats the
+  schema before returning it. The provider parses both sides as JSON
+  before comparing, so cosmetic differences (whitespace, key order) are
+  ignored while structural drift is still detected.
+
+## Compatibility
+
+| Component | Minimum |
+| --- | --- |
+| Terraform | 1.8 |
+| Go (for building from source) | 1.23 |
+| Datadog API | v2 (`/api/v2/feature-flags/*`) |
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). Bug reports and pull requests
+are welcome.
 
 ## License
 
-[Apache License 2.0](./LICENSE)
+[Apache License 2.0](./LICENSE).
+
+## Trademarks
+
+"Datadog" and the Datadog logo are trademarks of Datadog, Inc. and are
+used here for descriptive purposes only.

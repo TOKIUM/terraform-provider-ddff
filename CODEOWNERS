@@ -1,0 +1,10 @@
+# Code owners for the repository.
+#
+# At least one CODEOWNER must approve every pull request. List GitHub
+# usernames or team slugs after each pattern. The last matching pattern
+# wins, so put more specific entries lower.
+#
+# Update this file when maintainership changes; the OSS publication
+# policy requires at least two active maintainers.
+
+* @TOKIUM/terraform-provider-datadog-feature-flags-maintainers
