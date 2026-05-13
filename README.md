@@ -27,10 +27,12 @@ terraform {
 }
 
 provider "ddff" {
-  # Credentials read from DD_API_KEY / DD_APP_KEY environment variables by default.
+  # Credentials read from DD_API_KEY / DD_APP_KEY environment variables by default
+  # (DATADOG_API_KEY / DATADOG_APP_KEY are honored as a secondary fallback, matching
+  # the official DataDog/datadog provider's convention).
   # api_key = var.dd_api_key
   # app_key = var.dd_app_key
-  # site    = "datadoghq.com"
+  # api_url = "https://api.datadoghq.com"  # or DD_HOST / DATADOG_HOST
 }
 
 resource "ddff_feature_flag" "new_checkout" {

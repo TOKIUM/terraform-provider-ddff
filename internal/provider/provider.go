@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"net/url"
 	"os"
 
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
@@ -32,20 +33,20 @@ func (p *ddffProvider) Metadata(_ context.Context, _ provider.MetadataRequest, r
 
 func (p *ddffProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Manages Datadog Feature Flags resources.",
+		MarkdownDescription: "Manages Datadog Feature Flags resources. Credentials and the API URL are read from the provider configuration first, then from `DD_*` environment variables (e.g. `DD_API_KEY`), then from `DATADOG_*` environment variables (e.g. `DATADOG_API_KEY`). The naming and precedence match the official `DataDog/datadog` Terraform provider.",
 		Attributes: map[string]schema.Attribute{
 			"api_key": schema.StringAttribute{
-				MarkdownDescription: "Datadog API key. Falls back to the `DD_API_KEY` environment variable.",
+				MarkdownDescription: "Datadog API key. Falls back to `DD_API_KEY`, then `DATADOG_API_KEY`.",
 				Optional:            true,
 				Sensitive:           true,
 			},
 			"app_key": schema.StringAttribute{
-				MarkdownDescription: "Datadog application key. Falls back to the `DD_APP_KEY` environment variable.",
+				MarkdownDescription: "Datadog application key. Falls back to `DD_APP_KEY`, then `DATADOG_APP_KEY`.",
 				Optional:            true,
 				Sensitive:           true,
 			},
-			"site": schema.StringAttribute{
-				MarkdownDescription: "Datadog site (e.g. `datadoghq.com`, `datadoghq.eu`, `us3.datadoghq.com`). Falls back to the `DD_SITE` environment variable, then `datadoghq.com`.",
+			"api_url": schema.StringAttribute{
+				MarkdownDescription: "Full Datadog API URL (e.g. `https://api.datadoghq.com`, `https://api.datadoghq.eu`, `https://api.us3.datadoghq.com`). Must include both protocol and host. Falls back to `DD_HOST`, then `DATADOG_HOST`. When unset the Datadog SDK default (`https://api.datadoghq.com`) is used.",
 				Optional:            true,
 			},
 		},
@@ -55,7 +56,7 @@ func (p *ddffProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp 
 type providerModel struct {
 	APIKey types.String `tfsdk:"api_key"`
 	AppKey types.String `tfsdk:"app_key"`
-	Site   types.String `tfsdk:"site"`
+	APIURL types.String `tfsdk:"api_url"`
 }
 
 // Clients holds the Datadog SDK clients and the credentials needed to
@@ -66,20 +67,32 @@ type providerModel struct {
 type Clients struct {
 	APIKey       string
 	AppKey       string
-	Site         string
+	APIURL       string
 	FeatureFlags *datadogV2.FeatureFlagsApi
 }
 
-// Context returns ctx augmented with the Datadog API keys and site so the
-// generated SDK picks up the credentials.
+// Context returns ctx augmented with the Datadog API keys and (optionally)
+// the alternate server URL so the generated SDK picks them up.
+//
+// When APIURL is set, we override the SDK's default server URL using the
+// same ContextServerIndex + ContextServerVariables pattern that the
+// official DataDog/terraform-provider-datadog uses. The URL must already
+// have been validated at Configure time.
 func (c *Clients) Context(ctx context.Context) context.Context {
 	ctx = context.WithValue(ctx, datadog.ContextAPIKeys, map[string]datadog.APIKey{
 		"apiKeyAuth": {Key: c.APIKey},
 		"appKeyAuth": {Key: c.AppKey},
 	})
-	ctx = context.WithValue(ctx, datadog.ContextServerVariables, map[string]string{
-		"site": c.Site,
-	})
+	if c.APIURL != "" {
+		parsed, err := url.Parse(c.APIURL)
+		if err == nil && parsed.Host != "" && parsed.Scheme != "" {
+			ctx = context.WithValue(ctx, datadog.ContextServerIndex, 1)
+			ctx = context.WithValue(ctx, datadog.ContextServerVariables, map[string]string{
+				"name":     parsed.Host,
+				"protocol": parsed.Scheme,
+			})
+		}
+	}
 	return ctx
 }
 
@@ -92,22 +105,27 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 	apiKey := stringOrEnv(cfg.APIKey, "DD_API_KEY", "DATADOG_API_KEY")
 	appKey := stringOrEnv(cfg.AppKey, "DD_APP_KEY", "DATADOG_APP_KEY")
-	site := stringOrEnv(cfg.Site, "DD_SITE", "DATADOG_SITE")
-	if site == "" {
-		site = "datadoghq.com"
-	}
+	apiURL := stringOrEnv(cfg.APIURL, "DD_HOST", "DATADOG_HOST")
 
 	if apiKey == "" {
 		resp.Diagnostics.AddError(
 			"Missing Datadog API key",
-			"Set the `api_key` provider attribute or the `DD_API_KEY` environment variable.",
+			"Set the `api_key` provider attribute, the `DD_API_KEY` environment variable, or `DATADOG_API_KEY`.",
 		)
 	}
 	if appKey == "" {
 		resp.Diagnostics.AddError(
 			"Missing Datadog application key",
-			"Set the `app_key` provider attribute or the `DD_APP_KEY` environment variable.",
+			"Set the `app_key` provider attribute, the `DD_APP_KEY` environment variable, or `DATADOG_APP_KEY`.",
 		)
+	}
+	if apiURL != "" {
+		parsed, parseErr := url.Parse(apiURL)
+		if parseErr != nil {
+			resp.Diagnostics.AddError("Invalid api_url", parseErr.Error())
+		} else if parsed.Host == "" || parsed.Scheme == "" {
+			resp.Diagnostics.AddError("Invalid api_url", "missing protocol or host: "+apiURL)
+		}
 	}
 	if resp.Diagnostics.HasError() {
 		return
@@ -120,7 +138,7 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	clients := &Clients{
 		APIKey:       apiKey,
 		AppKey:       appKey,
-		Site:         site,
+		APIURL:       apiURL,
 		FeatureFlags: datadogV2.NewFeatureFlagsApi(apiClient),
 	}
 	resp.DataSourceData = clients

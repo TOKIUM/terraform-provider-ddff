@@ -11,14 +11,14 @@ terraform {
 
 provider "ddff" {
   # All three attributes are optional. When unset they fall back to the
-  # DD_API_KEY / DD_APP_KEY / DD_SITE environment variables (and
-  # DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_SITE as a secondary
+  # DD_API_KEY / DD_APP_KEY / DD_HOST environment variables (and
+  # DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_HOST as a secondary
   # fallback). Setting them inline here is supported but discouraged for
   # secrets.
   #
   # api_key = var.dd_api_key
   # app_key = var.dd_app_key
-  site = "datadoghq.com"
+  api_url = "https://api.datadoghq.com"
 }
 
 # -----------------------------------------------------------------------------
