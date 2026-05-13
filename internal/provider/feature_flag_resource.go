@@ -8,6 +8,7 @@ import (
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
 	"github.com/google/uuid"
+	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -39,7 +40,7 @@ type featureFlagModel struct {
 	Description       types.String `tfsdk:"description"`
 	ValueType         types.String `tfsdk:"value_type"`
 	DefaultVariantKey types.String `tfsdk:"default_variant_key"`
-	JSONSchema        types.String `tfsdk:"json_schema"`
+	JSONSchema        jsontypes.Normalized `tfsdk:"json_schema"`
 	Variants          []variantModel `tfsdk:"variants"`
 	CreatedAt         types.String `tfsdk:"created_at"`
 	UpdatedAt         types.String `tfsdk:"updated_at"`
@@ -101,8 +102,9 @@ func (r *featureFlagResource) Schema(_ context.Context, _ resource.SchemaRequest
 				},
 			},
 			"json_schema": schema.StringAttribute{
-				MarkdownDescription: "JSON schema used to validate variant values when `value_type` is `JSON`.",
+				MarkdownDescription: "JSON schema used to validate variant values when `value_type` is `JSON`. Compared by JSON semantic equality so server-side reformatting (whitespace, key order) is not treated as drift.",
 				Optional:            true,
+				CustomType:          jsontypes.NormalizedType{},
 			},
 			"created_at": schema.StringAttribute{
 				Computed: true,
@@ -304,12 +306,15 @@ func flagToModel(res *datadogV2.FeatureFlagResponse, m *featureFlagModel) {
 	// inside per-environment settings instead). We preserve whatever is already
 	// in the model so subsequent Reads don't show drift.
 
-	// json_schema is preserved from the model. The Datadog API re-serializes
-	// the JSON before returning it, which can change key order and whitespace
-	// without changing meaning. Trusting the model value avoids
-	// "inconsistent result after apply" failures at the cost of not detecting
-	// drift if the schema is edited from the Datadog UI. A future patch can
-	// add semantic-equality handling to restore drift detection.
+	// json_schema uses jsontypes.Normalized so the framework's semantic
+	// equality check ignores server-side reformatting (whitespace, key
+	// order). We can therefore safely reflect the API response in state
+	// without triggering "inconsistent result after apply" failures.
+	if attrs.JsonSchema.IsSet() && attrs.JsonSchema.Get() != nil {
+		m.JSONSchema = jsontypes.NewNormalizedValue(*attrs.JsonSchema.Get())
+	} else {
+		m.JSONSchema = jsontypes.NewNormalizedNull()
+	}
 
 	variants := make([]variantModel, 0, len(attrs.Variants))
 	for _, v := range attrs.Variants {
