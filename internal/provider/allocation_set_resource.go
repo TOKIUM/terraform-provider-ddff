@@ -455,4 +455,3 @@ func mergeAllocationsResponse(plan *allocationSetModel, data []datadogV2.Allocat
 		}
 	}
 }
-

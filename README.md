@@ -34,6 +34,10 @@ provider "ddff" {
 
 ## Quick start
 
+Declare a flag, bind it to a production environment, and serve `on` only
+to customers in the `enterprise` / `professional` tiers. Everyone else
+gets the `default_variant_key` (`off`).
+
 ```hcl
 resource "ddff_feature_flag" "new_checkout" {
   key                 = "new_checkout_flow"
@@ -52,6 +56,44 @@ resource "ddff_feature_flag" "new_checkout" {
     key   = "off"
     name  = "Off"
     value = "false"
+  }
+}
+
+data "ddff_environment" "production" {
+  name = "Production"
+}
+
+resource "ddff_feature_flag_environment" "new_checkout_prod" {
+  feature_flag_id = ddff_feature_flag.new_checkout.id
+  environment_id  = data.ddff_environment.production.id
+  enabled         = true
+}
+
+resource "ddff_allocation_set" "new_checkout_prod" {
+  feature_flag_id = ddff_feature_flag.new_checkout.id
+  environment_id  = data.ddff_environment.production.id
+
+  allocation {
+    key  = "tier-allowlist"
+    name = "Allowed customer tiers"
+    type = "FEATURE_GATE"
+
+    targeting_rule {
+      condition {
+        attribute = "customer_tier"
+        operator  = "ONE_OF"
+        value     = ["enterprise", "professional"]
+      }
+    }
+
+    variant_weight {
+      variant_key = "on"
+      value       = 100
+    }
+    variant_weight {
+      variant_key = "off"
+      value       = 0
+    }
   }
 }
 ```
