@@ -115,9 +115,6 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 						"id": schema.StringAttribute{
 							MarkdownDescription: "UUID assigned by the API on create.",
 							Computed:            true,
-							PlanModifiers: []planmodifier.String{
-								stringplanmodifier.UseStateForUnknown(),
-							},
 						},
 						"key": schema.StringAttribute{
 							MarkdownDescription: "Stable, human-readable key for this allocation. Must be unique within the (flag, environment) set.",
@@ -365,6 +362,16 @@ func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKe
 			Type:           datadogV2.AllocationType(a.Type.ValueString()),
 			TargetingRules: targetingRules,
 			VariantWeights: variantWeights,
+		}
+		// Pass the existing allocation's UUID through when we know it
+		// (i.e. on Update), so the server treats this as an update of an
+		// existing record instead of creating a duplicate and rejecting
+		// the conflicting key with 409.
+		if !a.ID.IsNull() && !a.ID.IsUnknown() && a.ID.ValueString() != "" {
+			if id, parseErr := uuid.Parse(a.ID.ValueString()); parseErr == nil {
+				idCopy := id
+				attrs.Id = &idCopy
+			}
 		}
 		body.Data = append(body.Data, datadogV2.AllocationDataRequest{
 			Type:       datadogV2.ALLOCATIONDATATYPE_ALLOCATIONS,
