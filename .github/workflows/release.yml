@@ -1,24 +1,63 @@
 name: release
 
-# Fires when release-please merges its release PR and creates the
-# vX.Y.Z tag on main. goreleaser builds + signs the artifacts and
-# attaches them to the GitHub Release that release-please opened.
+# Combines release-please (Conventional Commits + CHANGELOG / manifest
+# bookkeeping + tag creation) and goreleaser (build + sign + upload to
+# GitHub Releases) in a single workflow run. Keeping both jobs in one
+# workflow run side-steps GitHub's anti-recursion rule that would
+# otherwise prevent the goreleaser job from seeing the tag-push event
+# produced by release-please's GITHUB_TOKEN.
+#
+# The `push: tags` trigger is kept as a recovery path so an operator
+# can re-push a tag manually (`git push origin :v0.1.0 && git push
+# origin v0.1.0`) to re-run goreleaser without going through
+# release-please again.
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  release-please:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          target-branch: main
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  goreleaser:
+    needs: release-please
+    if: |
+      always() && (
+        needs.release-please.outputs.release_created == 'true'
+        || startsWith(github.ref, 'refs/tags/v')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # On a release-please-driven run the tag was just created in
+          # the previous job and HEAD of main does not point at it; on
+          # a manual tag re-push the ref is already the tag.
+          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
 
       - uses: actions/setup-go@v5
         with:
