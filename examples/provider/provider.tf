@@ -8,25 +8,11 @@ terraform {
 }
 
 provider "ddff" {
-  # api_key, app_key, site default to DD_API_KEY / DD_APP_KEY / DD_SITE.
-}
-
-resource "ddff_feature_flag" "new_checkout" {
-  key                 = "new_checkout_flow"
-  name                = "New checkout flow"
-  description         = "Enables the redesigned checkout flow."
-  value_type          = "BOOLEAN"
-  default_variant_key = "off"
-
-  variants {
-    key   = "on"
-    name  = "On"
-    value = "true"
-  }
-
-  variants {
-    key   = "off"
-    name  = "Off"
-    value = "false"
-  }
+  # api_key, app_key, and site fall back to DD_API_KEY / DD_APP_KEY / DD_SITE
+  # (or DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_SITE) environment
+  # variables when not set here.
+  #
+  # api_key = var.dd_api_key
+  # app_key = var.dd_app_key
+  # site    = "datadoghq.com"
 }

@@ -58,10 +58,29 @@ type providerModel struct {
 	Site   types.String `tfsdk:"site"`
 }
 
-// Clients holds the Datadog SDK clients passed to resources.
+// Clients holds the Datadog SDK clients and the credentials needed to
+// build an authenticated context per request. We deliberately do NOT
+// capture the configure-time context here: that context is canceled once
+// Configure returns, so each CRUD call rebuilds the DD context from its
+// own request-scoped ctx.
 type Clients struct {
-	Ctx          context.Context
+	APIKey       string
+	AppKey       string
+	Site         string
 	FeatureFlags *datadogV2.FeatureFlagsApi
+}
+
+// Context returns ctx augmented with the Datadog API keys and site so the
+// generated SDK picks up the credentials.
+func (c *Clients) Context(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, datadog.ContextAPIKeys, map[string]datadog.APIKey{
+		"apiKeyAuth": {Key: c.APIKey},
+		"appKeyAuth": {Key: c.AppKey},
+	})
+	ctx = context.WithValue(ctx, datadog.ContextServerVariables, map[string]string{
+		"site": c.Site,
+	})
+	return ctx
 }
 
 func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
@@ -71,9 +90,9 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		return
 	}
 
-	apiKey := stringOrEnv(cfg.APIKey, "DD_API_KEY")
-	appKey := stringOrEnv(cfg.AppKey, "DD_APP_KEY")
-	site := stringOrEnv(cfg.Site, "DD_SITE")
+	apiKey := stringOrEnv(cfg.APIKey, "DD_API_KEY", "DATADOG_API_KEY")
+	appKey := stringOrEnv(cfg.AppKey, "DD_APP_KEY", "DATADOG_APP_KEY")
+	site := stringOrEnv(cfg.Site, "DD_SITE", "DATADOG_SITE")
 	if site == "" {
 		site = "datadoghq.com"
 	}
@@ -94,21 +113,14 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 		return
 	}
 
-	ddCtx := datadog.NewDefaultContext(ctx)
-	ddCtx = context.WithValue(ddCtx, datadog.ContextAPIKeys, map[string]datadog.APIKey{
-		"apiKeyAuth": {Key: apiKey},
-		"appKeyAuth": {Key: appKey},
-	})
-	ddCtx = context.WithValue(ddCtx, datadog.ContextServerVariables, map[string]string{
-		"site": site,
-	})
-
 	configuration := datadog.NewConfiguration()
 	configuration.UserAgent = "terraform-provider-datadog-feature-flags/" + p.version
 	apiClient := datadog.NewAPIClient(configuration)
 
 	clients := &Clients{
-		Ctx:          ddCtx,
+		APIKey:       apiKey,
+		AppKey:       appKey,
+		Site:         site,
 		FeatureFlags: datadogV2.NewFeatureFlagsApi(apiClient),
 	}
 	resp.DataSourceData = clients
@@ -125,9 +137,14 @@ func (p *ddffProvider) DataSources(_ context.Context) []func() datasource.DataSo
 	return nil
 }
 
-func stringOrEnv(v types.String, env string) string {
+func stringOrEnv(v types.String, envs ...string) string {
 	if !v.IsNull() && !v.IsUnknown() && v.ValueString() != "" {
 		return v.ValueString()
 	}
-	return os.Getenv(env)
+	for _, env := range envs {
+		if val := os.Getenv(env); val != "" {
+			return val
+		}
+	}
+	return ""
 }

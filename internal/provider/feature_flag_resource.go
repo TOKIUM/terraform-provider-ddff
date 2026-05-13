@@ -188,7 +188,7 @@ func (r *featureFlagResource) Create(ctx context.Context, req resource.CreateReq
 		},
 	}
 
-	res, httpResp, err := r.clients.FeatureFlags.CreateFeatureFlag(r.clients.Ctx, body)
+	res, httpResp, err := r.clients.FeatureFlags.CreateFeatureFlag(r.clients.Context(ctx), body)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to create feature flag", apiErr(err, httpResp))
 		return
@@ -211,7 +211,7 @@ func (r *featureFlagResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Ctx, id)
+	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), id)
 	if err != nil {
 		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
 			resp.State.RemoveResource(ctx)
@@ -255,7 +255,7 @@ func (r *featureFlagResource) Update(ctx context.Context, req resource.UpdateReq
 		},
 	}
 
-	res, httpResp, err := r.clients.FeatureFlags.UpdateFeatureFlag(r.clients.Ctx, id, body)
+	res, httpResp, err := r.clients.FeatureFlags.UpdateFeatureFlag(r.clients.Context(ctx), id, body)
 	if err != nil {
 		resp.Diagnostics.AddError("Failed to update feature flag", apiErr(err, httpResp))
 		return
@@ -279,7 +279,7 @@ func (r *featureFlagResource) Delete(ctx context.Context, req resource.DeleteReq
 	}
 
 	// The Datadog API does not expose a physical delete. Archive instead.
-	_, httpResp, err := r.clients.FeatureFlags.ArchiveFeatureFlag(r.clients.Ctx, id)
+	_, httpResp, err := r.clients.FeatureFlags.ArchiveFeatureFlag(r.clients.Context(ctx), id)
 	if err != nil && (httpResp == nil || httpResp.StatusCode != http.StatusNotFound) {
 		resp.Diagnostics.AddError("Failed to archive feature flag", apiErr(err, httpResp))
 		return
@@ -304,11 +304,12 @@ func flagToModel(res *datadogV2.FeatureFlagResponse, m *featureFlagModel) {
 	// inside per-environment settings instead). We preserve whatever is already
 	// in the model so subsequent Reads don't show drift.
 
-	if attrs.JsonSchema.IsSet() && attrs.JsonSchema.Get() != nil {
-		m.JSONSchema = types.StringValue(*attrs.JsonSchema.Get())
-	} else {
-		m.JSONSchema = types.StringNull()
-	}
+	// json_schema is preserved from the model. The Datadog API re-serializes
+	// the JSON before returning it, which can change key order and whitespace
+	// without changing meaning. Trusting the model value avoids
+	// "inconsistent result after apply" failures at the cost of not detecting
+	// drift if the schema is edited from the Datadog UI. A future patch can
+	// add semantic-equality handling to restore drift detection.
 
 	variants := make([]variantModel, 0, len(attrs.Variants))
 	for _, v := range attrs.Variants {
