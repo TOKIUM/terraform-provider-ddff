@@ -133,6 +133,12 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 
 	configuration := datadog.NewConfiguration()
 	configuration.UserAgent = "terraform-provider-ddff/" + p.version
+	// DDFF_DEBUG=1 enables verbose HTTP request/response logging in the
+	// underlying Datadog SDK. Useful for debugging schema mismatches but
+	// noisy enough to default off.
+	if os.Getenv("DDFF_DEBUG") != "" {
+		configuration.Debug = true
+	}
 	apiClient := datadog.NewAPIClient(configuration)
 
 	clients := &Clients{
@@ -150,6 +156,7 @@ func (p *ddffProvider) Resources(_ context.Context) []func() resource.Resource {
 		NewFeatureFlagResource,
 		NewEnvironmentResource,
 		NewFeatureFlagEnvironmentResource,
+		NewAllocationSetResource,
 	}
 }
 

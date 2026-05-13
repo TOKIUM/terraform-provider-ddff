@@ -45,8 +45,9 @@ The [`terraform import` command](https://developer.hashicorp.com/terraform/cli/c
 
 ```shell
 #!/usr/bin/env bash
-# Import is keyed by "<feature_flag_id>:<environment_id>".
+# Import is keyed by "<feature_flag_id>:<environment_id>". Replace both
+# UUIDs below with the actual IDs from the Datadog UI or API.
 terraform import \
   ddff_feature_flag_environment.new_checkout_prod \
-  4f8e31e1-307f-4a70-a245-9b2426d25415:0a9a8d89-6fab-4829-9c72-b33540fb8fce
+  00000000-0000-0000-0000-000000000000:00000000-0000-0000-0000-000000000001
 ```

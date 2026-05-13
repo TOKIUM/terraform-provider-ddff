@@ -157,6 +157,39 @@ resource "ddff_feature_flag_environment" "boolean_e2e" {
 }
 
 # -----------------------------------------------------------------------------
+# Allocation set: serve `on` to listed customer tiers, fall back to the flag's
+# default_variant_key ("off") for everyone else.
+# -----------------------------------------------------------------------------
+
+resource "ddff_allocation_set" "boolean_e2e" {
+  feature_flag_id = ddff_feature_flag.boolean.id
+  environment_id  = ddff_environment.e2e.id
+
+  allocation {
+    key  = "tier-allowlist"
+    name = "Allowed customer tiers"
+    type = "FEATURE_GATE"
+
+    targeting_rule {
+      condition {
+        attribute = "customer_tier"
+        operator  = "ONE_OF"
+        value     = ["enterprise", "professional"]
+      }
+    }
+
+    variant_weight {
+      variant_key = "on"
+      value       = 100
+    }
+    variant_weight {
+      variant_key = "off"
+      value       = 0
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Data sources - verify lookup works for both flag (by key) and environment
 # (by name; the Datadog API does not expose a per-environment key).
 # -----------------------------------------------------------------------------
@@ -198,6 +231,13 @@ output "boolean_in_e2e" {
     id                 = ddff_feature_flag_environment.boolean_e2e.id
     status             = ddff_feature_flag_environment.boolean_e2e.status
     default_variant_id = ddff_feature_flag_environment.boolean_e2e.default_variant_id
+  }
+}
+
+output "boolean_e2e_allocation" {
+  value = {
+    id    = ddff_allocation_set.boolean_e2e.id
+    rules = [for a in ddff_allocation_set.boolean_e2e.allocation : { key = a.key, id = a.id, order_position = a.order_position }]
   }
 }
 

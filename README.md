@@ -67,13 +67,7 @@ reference docs are served on the
 | `ddff_feature_flag` | Define a feature flag, its value type, and its variants. |
 | `ddff_environment` | Manage environments (dev / staging / prod, custom scopes). |
 | `ddff_feature_flag_environment` | Enable or disable a flag in a specific environment. |
-
-> **Targeting rule (allocation) management is not yet supported.**
-> The upstream API exposes only a "create one" POST and a "replace all"
-> PUT for allocations, with no dedicated read endpoint, which makes it
-> hard to model as an idempotent Terraform resource. A `ddff_allocation`
-> resource is planned for a later release; manage allocations through
-> the Datadog UI in the meantime.
+| `ddff_allocation_set` | Manage the full set of targeting rules + variant weight distributions for one feature flag in one environment. |
 
 ## Data sources
 
@@ -107,6 +101,10 @@ The provider does not persist credentials; they are read at apply time only.
   schema before returning it. The provider parses both sides as JSON
   before comparing, so cosmetic differences (whitespace, key order) are
   ignored while structural drift is still detected.
+- **`ddff_allocation_set` does not detect UI-side drift** — The upstream
+  API exposes no dedicated read endpoint for allocations. The resource
+  trusts state and reconciles by overwriting on the next apply; edits
+  made in the Datadog UI will be silently replaced.
 
 ## Compatibility
 
