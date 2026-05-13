@@ -327,16 +327,13 @@ func flagToModel(res *datadogV2.FeatureFlagResponse, m *featureFlagModel) {
 	m.Variants = variants
 
 	if attrs.CreatedAt != nil {
-		m.CreatedAt = types.StringValue(attrs.CreatedAt.Format("2006-01-02T15:04:05Z07:00"))
+		m.CreatedAt = types.StringValue(attrs.CreatedAt.Format(timeFormat))
+	} else {
+		m.CreatedAt = types.StringNull()
 	}
 	if attrs.UpdatedAt != nil {
-		m.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"))
+		m.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format(timeFormat))
+	} else {
+		m.UpdatedAt = types.StringNull()
 	}
-}
-
-func apiErr(err error, httpResp *http.Response) string {
-	if httpResp == nil {
-		return err.Error()
-	}
-	return fmt.Sprintf("%s (status %d)", err.Error(), httpResp.StatusCode)
 }
