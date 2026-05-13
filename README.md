@@ -66,7 +66,13 @@ on the [Terraform Registry](https://registry.terraform.io/providers/TOKIUM/datad
 | `ddff_feature_flag` | Define a feature flag, its value type, and its variants. |
 | `ddff_environment` | Manage feature flag environments (dev/staging/prod, custom scopes). |
 | `ddff_feature_flag_environment` | Enable or disable a flag in a specific environment. |
-| `ddff_allocation` | Define targeting rules and variant weight distribution for a flag in an environment. |
+
+> **Targeting rule (allocation) management is not yet supported.**
+> The Datadog API exposes only a "create one" POST and a "replace all" PUT
+> for allocations, with no dedicated read endpoint, which makes it hard to
+> model as an idempotent Terraform resource. A `ddff_allocation` resource
+> is planned for a later release; manage allocations through the Datadog
+> UI in the meantime.
 
 ## Data sources
 

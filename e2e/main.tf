@@ -10,19 +10,14 @@ terraform {
 }
 
 provider "ddff" {
-  # All three attributes are optional. When unset they fall back to the
-  # DD_API_KEY / DD_APP_KEY / DD_HOST environment variables (and
-  # DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_HOST as a secondary
-  # fallback). Setting them inline here is supported but discouraged for
-  # secrets.
-  #
-  # api_key = var.dd_api_key
-  # app_key = var.dd_app_key
+  # Credentials and the API URL fall back to DD_API_KEY / DD_APP_KEY /
+  # DD_HOST (and DATADOG_API_KEY / DATADOG_APP_KEY / DATADOG_HOST as a
+  # secondary fallback) when not set here.
   api_url = "https://api.datadoghq.com"
 }
 
 # -----------------------------------------------------------------------------
-# BOOLEAN flag — the canonical use case.
+# Feature flags - one per supported value_type to cover the full schema.
 # -----------------------------------------------------------------------------
 
 resource "ddff_feature_flag" "boolean" {
@@ -37,17 +32,12 @@ resource "ddff_feature_flag" "boolean" {
     name  = "On"
     value = "true"
   }
-
   variants {
     key   = "off"
     name  = "Off"
     value = "false"
   }
 }
-
-# -----------------------------------------------------------------------------
-# STRING flag with three variants (A/B/C experiment).
-# -----------------------------------------------------------------------------
 
 resource "ddff_feature_flag" "string" {
   key                 = "ddff_e2e_string"
@@ -61,23 +51,17 @@ resource "ddff_feature_flag" "string" {
     name  = "Control"
     value = "control"
   }
-
   variants {
     key   = "treatment_a"
     name  = "Treatment A"
     value = "treatment_a"
   }
-
   variants {
     key   = "treatment_b"
     name  = "Treatment B"
     value = "treatment_b"
   }
 }
-
-# -----------------------------------------------------------------------------
-# INTEGER flag — values are still encoded as strings at the API layer.
-# -----------------------------------------------------------------------------
 
 resource "ddff_feature_flag" "integer" {
   key                 = "ddff_e2e_integer"
@@ -91,23 +75,17 @@ resource "ddff_feature_flag" "integer" {
     name  = "Small"
     value = "10"
   }
-
   variants {
     key   = "medium"
     name  = "Medium"
     value = "100"
   }
-
   variants {
     key   = "large"
     name  = "Large"
     value = "1000"
   }
 }
-
-# -----------------------------------------------------------------------------
-# NUMERIC flag — floating-point variants.
-# -----------------------------------------------------------------------------
 
 resource "ddff_feature_flag" "numeric" {
   key                 = "ddff_e2e_numeric"
@@ -121,17 +99,12 @@ resource "ddff_feature_flag" "numeric" {
     name  = "Baseline"
     value = "0.05"
   }
-
   variants {
     key   = "aggressive"
     name  = "Aggressive"
     value = "0.25"
   }
 }
-
-# -----------------------------------------------------------------------------
-# JSON flag — exercises both json_schema and structured variant values.
-# -----------------------------------------------------------------------------
 
 resource "ddff_feature_flag" "json" {
   key                 = "ddff_e2e_json"
@@ -154,13 +127,11 @@ resource "ddff_feature_flag" "json" {
     name  = "Disabled"
     value = jsonencode({ enabled = false, max_rows = 0 })
   }
-
   variants {
     key   = "enabled_small"
     name  = "Enabled (small)"
     value = jsonencode({ enabled = true, max_rows = 100 })
   }
-
   variants {
     key   = "enabled_large"
     name  = "Enabled (large)"
@@ -169,45 +140,66 @@ resource "ddff_feature_flag" "json" {
 }
 
 # -----------------------------------------------------------------------------
-# Outputs — surface every computed attribute for visual inspection.
+# Environment + per-environment binding.
+# -----------------------------------------------------------------------------
+
+resource "ddff_environment" "e2e" {
+  name                          = "ddff e2e"
+  queries                       = ["env:ddff-e2e"]
+  is_production                 = false
+  require_feature_flag_approval = false
+}
+
+resource "ddff_feature_flag_environment" "boolean_e2e" {
+  feature_flag_id = ddff_feature_flag.boolean.id
+  environment_id  = ddff_environment.e2e.id
+  enabled         = true
+}
+
+# -----------------------------------------------------------------------------
+# Data sources - verify lookup works for both flag (by key) and environment
+# (by name; the Datadog API does not expose a per-environment key).
+# -----------------------------------------------------------------------------
+
+data "ddff_feature_flag" "boolean_lookup" {
+  key = ddff_feature_flag.boolean.key
+}
+
+data "ddff_environment" "e2e_lookup" {
+  name = ddff_environment.e2e.name
+}
+
+# -----------------------------------------------------------------------------
+# Outputs - surface every computed attribute for visual inspection.
 # -----------------------------------------------------------------------------
 
 output "boolean_flag" {
   value = {
     id         = ddff_feature_flag.boolean.id
     created_at = ddff_feature_flag.boolean.created_at
-    updated_at = ddff_feature_flag.boolean.updated_at
   }
 }
 
-output "string_flag" {
+output "string_flag_id" { value = ddff_feature_flag.string.id }
+output "integer_flag_id" { value = ddff_feature_flag.integer.id }
+output "numeric_flag_id" { value = ddff_feature_flag.numeric.id }
+output "json_flag_id" { value = ddff_feature_flag.json.id }
+
+output "environment" {
   value = {
-    id         = ddff_feature_flag.string.id
-    created_at = ddff_feature_flag.string.created_at
-    updated_at = ddff_feature_flag.string.updated_at
+    id            = ddff_environment.e2e.id
+    name          = ddff_environment.e2e.name
+    is_production = ddff_environment.e2e.is_production
   }
 }
 
-output "integer_flag" {
+output "boolean_in_e2e" {
   value = {
-    id         = ddff_feature_flag.integer.id
-    created_at = ddff_feature_flag.integer.created_at
-    updated_at = ddff_feature_flag.integer.updated_at
+    id                 = ddff_feature_flag_environment.boolean_e2e.id
+    status             = ddff_feature_flag_environment.boolean_e2e.status
+    default_variant_id = ddff_feature_flag_environment.boolean_e2e.default_variant_id
   }
 }
 
-output "numeric_flag" {
-  value = {
-    id         = ddff_feature_flag.numeric.id
-    created_at = ddff_feature_flag.numeric.created_at
-    updated_at = ddff_feature_flag.numeric.updated_at
-  }
-}
-
-output "json_flag" {
-  value = {
-    id         = ddff_feature_flag.json.id
-    created_at = ddff_feature_flag.json.created_at
-    updated_at = ddff_feature_flag.json.updated_at
-  }
-}
+output "boolean_lookup_id" { value = data.ddff_feature_flag.boolean_lookup.id }
+output "e2e_lookup_id" { value = data.ddff_environment.e2e_lookup.id }
