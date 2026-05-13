@@ -2,9 +2,6 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"net/http"
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -89,18 +86,9 @@ func (r *featureFlagEnvironmentResource) Schema(_ context.Context, _ resource.Sc
 }
 
 func (r *featureFlagEnvironmentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		r.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	r.clients = clients
 }
 
 func (r *featureFlagEnvironmentResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -210,51 +198,22 @@ func (r *featureFlagEnvironmentResource) ImportState(ctx context.Context, req re
 
 func (r *featureFlagEnvironmentResource) setEnabled(ctx context.Context, flagID, envID uuid.UUID, enabled bool) error {
 	if enabled {
-		_, err := r.clients.FeatureFlags.EnableFeatureFlagEnvironment(r.clients.Context(ctx), flagID, envID)
-		return err
+		httpResp, err := r.clients.FeatureFlags.EnableFeatureFlagEnvironment(r.clients.Context(ctx), flagID, envID)
+		return notFoundIfHTTP404(err, httpResp)
 	}
-	_, err := r.clients.FeatureFlags.DisableFeatureFlagEnvironment(r.clients.Context(ctx), flagID, envID)
-	return err
+	httpResp, err := r.clients.FeatureFlags.DisableFeatureFlagEnvironment(r.clients.Context(ctx), flagID, envID)
+	return notFoundIfHTTP404(err, httpResp)
 }
 
-// refreshFromFlag fetches the parent flag and locates the (env_id) entry
-// inside feature_flag_environments[], populating the model's computed
-// fields. The lookup is done against the raw JSON to side-step the SDK
-// regression that collapses env entries into UnparsedObject when they
-// have allocations.
+// refreshFromFlag locates the (env_id) entry inside the parent flag's
+// feature_flag_environments[] and populates the model's computed fields.
 func (r *featureFlagEnvironmentResource) refreshFromFlag(ctx context.Context, flagID, envID uuid.UUID, m *featureFlagEnvironmentModel) error {
-	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), flagID)
+	raw, err := r.clients.findRawEnvEntry(ctx, flagID, envID)
 	if err != nil {
-		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
-			return errNotFound
-		}
 		return err
 	}
-
-	wantID := envID.String()
-	for _, env := range res.Data.Attributes.FeatureFlagEnvironments {
-		var raw map[string]interface{}
-		if env.UnparsedObject != nil {
-			raw = env.UnparsedObject
-		} else {
-			bytes, mErr := json.Marshal(env)
-			if mErr != nil {
-				continue
-			}
-			if uErr := json.Unmarshal(bytes, &raw); uErr != nil {
-				continue
-			}
-		}
-
-		envIDInJSON, _ := raw["environment_id"].(string)
-		if envIDInJSON != wantID {
-			continue
-		}
-
-		applyRawFlagEnvironmentToModel(raw, m)
-		return nil
-	}
-	return errNotFound
+	applyRawFlagEnvironmentToModel(raw, m)
+	return nil
 }
 
 // applyRawFlagEnvironmentToModel writes the status / default_variant_id /

@@ -2,12 +2,9 @@ package provider
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
-	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -97,18 +94,9 @@ func (r *environmentResource) Schema(_ context.Context, _ resource.SchemaRequest
 }
 
 func (r *environmentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		r.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	r.clients = clients
 }
 
 func (r *environmentResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -165,15 +153,14 @@ func (r *environmentResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	id, err := uuid.Parse(state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid environment ID", err.Error())
+	id, ok := parseUUID(state.ID.ValueString(), "environment ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlagsEnvironment(r.clients.Context(ctx), id)
-	if err != nil {
-		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
+	if err := notFoundIfHTTP404(err, httpResp); err != nil {
+		if isNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -192,9 +179,8 @@ func (r *environmentResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	id, err := uuid.Parse(plan.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid environment ID", err.Error())
+	id, ok := parseUUID(plan.ID.ValueString(), "environment ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
@@ -233,14 +219,13 @@ func (r *environmentResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	id, err := uuid.Parse(state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid environment ID", err.Error())
+	id, ok := parseUUID(state.ID.ValueString(), "environment ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	httpResp, err := r.clients.FeatureFlags.DeleteFeatureFlagsEnvironment(r.clients.Context(ctx), id)
-	if err != nil && (httpResp == nil || httpResp.StatusCode != http.StatusNotFound) {
+	if err := notFoundIfHTTP404(err, httpResp); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Failed to delete environment", apiErr(err, httpResp))
 		return
 	}
@@ -266,24 +251,12 @@ func envToModel(ctx context.Context, res *datadogV2.EnvironmentResponse, m *envi
 	} else {
 		m.RequireFeatureFlagApproval = types.BoolValue(false)
 	}
-	if attrs.Description.IsSet() && attrs.Description.Get() != nil {
-		m.Description = types.StringValue(*attrs.Description.Get())
-	} else {
-		m.Description = types.StringNull()
-	}
+	m.Description = nullableStringToTF(attrs.Description)
 
 	queries, d := types.ListValueFrom(ctx, types.StringType, attrs.Queries)
 	diags.Append(d...)
 	m.Queries = queries
 
-	if attrs.CreatedAt != nil {
-		m.CreatedAt = types.StringValue(attrs.CreatedAt.Format(timeFormat))
-	} else {
-		m.CreatedAt = types.StringNull()
-	}
-	if attrs.UpdatedAt != nil {
-		m.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format(timeFormat))
-	} else {
-		m.UpdatedAt = types.StringNull()
-	}
+	m.CreatedAt = nullableTimeToTF(attrs.CreatedAt)
+	m.UpdatedAt = nullableTimeToTF(attrs.UpdatedAt)
 }

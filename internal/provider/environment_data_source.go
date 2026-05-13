@@ -61,18 +61,9 @@ func (d *environmentDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 }
 
 func (d *environmentDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		d.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	d.clients = clients
 }
 
 func (d *environmentDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
@@ -116,26 +107,14 @@ func (d *environmentDataSource) Read(ctx context.Context, req datasource.ReadReq
 	} else {
 		data.RequireFeatureFlagApproval = types.BoolValue(false)
 	}
-	if attrs.Description.IsSet() && attrs.Description.Get() != nil {
-		data.Description = types.StringValue(*attrs.Description.Get())
-	} else {
-		data.Description = types.StringNull()
-	}
+	data.Description = nullableStringToTF(attrs.Description)
 
 	queries, qDiag := types.ListValueFrom(ctx, types.StringType, attrs.Queries)
 	resp.Diagnostics.Append(qDiag...)
 	data.Queries = queries
 
-	if attrs.CreatedAt != nil {
-		data.CreatedAt = types.StringValue(attrs.CreatedAt.Format(timeFormat))
-	} else {
-		data.CreatedAt = types.StringNull()
-	}
-	if attrs.UpdatedAt != nil {
-		data.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format(timeFormat))
-	} else {
-		data.UpdatedAt = types.StringNull()
-	}
+	data.CreatedAt = nullableTimeToTF(attrs.CreatedAt)
+	data.UpdatedAt = nullableTimeToTF(attrs.UpdatedAt)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

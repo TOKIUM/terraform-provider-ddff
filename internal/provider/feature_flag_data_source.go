@@ -79,18 +79,9 @@ func (d *featureFlagDataSource) Schema(_ context.Context, _ datasource.SchemaReq
 }
 
 func (d *featureFlagDataSource) Configure(_ context.Context, req datasource.ConfigureRequest, resp *datasource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		d.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	d.clients = clients
 }
 
 func (d *featureFlagDataSource) Read(ctx context.Context, req datasource.ReadRequest, resp *datasource.ReadResponse) {
@@ -138,12 +129,8 @@ func (d *featureFlagDataSource) Read(ctx context.Context, req datasource.ReadReq
 	}
 	data.Variants = variants
 
-	if attrs.CreatedAt != nil {
-		data.CreatedAt = types.StringValue(attrs.CreatedAt.Format(timeFormat))
-	}
-	if attrs.UpdatedAt != nil {
-		data.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format(timeFormat))
-	}
+	data.CreatedAt = nullableTimeToTF(attrs.CreatedAt)
+	data.UpdatedAt = nullableTimeToTF(attrs.UpdatedAt)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }

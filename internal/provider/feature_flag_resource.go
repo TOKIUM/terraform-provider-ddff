@@ -2,12 +2,9 @@ package provider
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
-	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -139,18 +136,9 @@ func (r *featureFlagResource) Schema(_ context.Context, _ resource.SchemaRequest
 }
 
 func (r *featureFlagResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		r.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	r.clients = clients
 }
 
 func (r *featureFlagResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -207,15 +195,14 @@ func (r *featureFlagResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	id, err := uuid.Parse(state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid feature flag ID", err.Error())
+	id, ok := parseUUID(state.ID.ValueString(), "feature flag ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), id)
-	if err != nil {
-		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
+	if err := notFoundIfHTTP404(err, httpResp); err != nil {
+		if isNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -234,9 +221,8 @@ func (r *featureFlagResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 
-	id, err := uuid.Parse(plan.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid feature flag ID", err.Error())
+	id, ok := parseUUID(plan.ID.ValueString(), "feature flag ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
@@ -274,15 +260,14 @@ func (r *featureFlagResource) Delete(ctx context.Context, req resource.DeleteReq
 		return
 	}
 
-	id, err := uuid.Parse(state.ID.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Invalid feature flag ID", err.Error())
+	id, ok := parseUUID(state.ID.ValueString(), "feature flag ID", &resp.Diagnostics)
+	if !ok {
 		return
 	}
 
 	// The Datadog API does not expose a physical delete. Archive instead.
 	_, httpResp, err := r.clients.FeatureFlags.ArchiveFeatureFlag(r.clients.Context(ctx), id)
-	if err != nil && (httpResp == nil || httpResp.StatusCode != http.StatusNotFound) {
+	if err := notFoundIfHTTP404(err, httpResp); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Failed to archive feature flag", apiErr(err, httpResp))
 		return
 	}
@@ -326,14 +311,6 @@ func flagToModel(res *datadogV2.FeatureFlagResponse, m *featureFlagModel) {
 	}
 	m.Variants = variants
 
-	if attrs.CreatedAt != nil {
-		m.CreatedAt = types.StringValue(attrs.CreatedAt.Format(timeFormat))
-	} else {
-		m.CreatedAt = types.StringNull()
-	}
-	if attrs.UpdatedAt != nil {
-		m.UpdatedAt = types.StringValue(attrs.UpdatedAt.Format(timeFormat))
-	} else {
-		m.UpdatedAt = types.StringNull()
-	}
+	m.CreatedAt = nullableTimeToTF(attrs.CreatedAt)
+	m.UpdatedAt = nullableTimeToTF(attrs.UpdatedAt)
 }

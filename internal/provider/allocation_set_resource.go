@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
+	"sort"
 
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
 	"github.com/google/uuid"
@@ -208,18 +208,9 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 }
 
 func (r *allocationSetResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
-	if req.ProviderData == nil {
-		return
+	if clients := configureClients(req.ProviderData, &resp.Diagnostics); clients != nil {
+		r.clients = clients
 	}
-	clients, ok := req.ProviderData.(*Clients)
-	if !ok {
-		resp.Diagnostics.AddError(
-			"Unexpected provider data type",
-			fmt.Sprintf("Expected *Clients, got %T", req.ProviderData),
-		)
-		return
-	}
-	r.clients = clients
 }
 
 func (r *allocationSetResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -268,75 +259,38 @@ func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadReque
 }
 
 // refreshAllocationsFromFlag fetches the parent flag, locates the env
-// entry by environment_id, and decodes its allocations array into the
-// typed []allocationModel that mirrors our HCL schema.
-//
-// The function works around two SDK quirks:
-//   - feature_flag_environments[].allocations is declared as a map by
-//     the SDK but returned as an array by the API, which collapses the
-//     entire env entry into UnparsedObject.
-//   - Even when the array shape lines up, Allocation.UnmarshalJSON's
-//     strict mode can reject responses with unknown fields. We re-parse
-//     via plain encoding/json which only fails on real type mismatches.
+// entry by environment_id via the shared raw-JSON lookup, and decodes
+// the allocations array into the model shape this resource exposes.
 func (r *allocationSetResource) refreshAllocationsFromFlag(ctx context.Context, flagID, envID uuid.UUID) ([]allocationModel, error) {
-	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), flagID)
+	raw, err := r.clients.findRawEnvEntry(ctx, flagID, envID)
 	if err != nil {
-		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
-			return nil, errNotFound
-		}
 		return nil, err
 	}
 
-	wantID := envID.String()
-	for _, env := range res.Data.Attributes.FeatureFlagEnvironments {
-		// Re-marshal the raw env entry (typed or UnparsedObject) so we
-		// can re-parse it with our own relaxed types.
-		var raw map[string]interface{}
-		if env.UnparsedObject != nil {
-			raw = env.UnparsedObject
-		} else {
-			bytes, mErr := json.Marshal(env)
-			if mErr != nil {
-				continue
-			}
-			if uErr := json.Unmarshal(bytes, &raw); uErr != nil {
-				continue
-			}
-		}
-
-		envIDInJSON, _ := raw["environment_id"].(string)
-		if envIDInJSON != wantID {
-			continue
-		}
-
-		// The matching env entry is ours. Pull the allocations slice.
-		allocsRaw, ok := raw["allocations"].([]interface{})
-		if !ok || len(allocsRaw) == 0 {
-			return []allocationModel{}, nil
-		}
-
-		bytes, mErr := json.Marshal(allocsRaw)
-		if mErr != nil {
-			return nil, fmt.Errorf("re-marshal allocations: %w", mErr)
-		}
-
-		var typed []rawAllocation
-		if uErr := json.Unmarshal(bytes, &typed); uErr != nil {
-			return nil, fmt.Errorf("decode allocations: %w", uErr)
-		}
-
-		out := make([]allocationModel, 0, len(typed))
-		for _, a := range typed {
-			model, convErr := rawAllocationToModel(ctx, a)
-			if convErr != nil {
-				return nil, convErr
-			}
-			out = append(out, model)
-		}
-		return out, nil
+	allocsRaw, ok := raw["allocations"].([]interface{})
+	if !ok || len(allocsRaw) == 0 {
+		return []allocationModel{}, nil
 	}
 
-	return nil, errNotFound
+	bytes, mErr := json.Marshal(allocsRaw)
+	if mErr != nil {
+		return nil, fmt.Errorf("re-marshal allocations: %w", mErr)
+	}
+
+	var typed []rawAllocation
+	if uErr := json.Unmarshal(bytes, &typed); uErr != nil {
+		return nil, fmt.Errorf("decode allocations: %w", uErr)
+	}
+
+	out := make([]allocationModel, 0, len(typed))
+	for _, a := range typed {
+		model, convErr := rawAllocationToModel(ctx, a)
+		if convErr != nil {
+			return nil, convErr
+		}
+		out = append(out, model)
+	}
+	return out, nil
 }
 
 // rawAllocation mirrors the JSON shape the API actually returns for an
@@ -437,7 +391,7 @@ func (r *allocationSetResource) Delete(ctx context.Context, req resource.DeleteR
 
 	body := datadogV2.OverwriteAllocationsRequest{Data: []datadogV2.AllocationDataRequest{}}
 	_, httpResp, err := r.clients.FeatureFlags.UpdateAllocationsForFeatureFlagInEnvironment(r.clients.Context(ctx), flagID, envID, body)
-	if err != nil && (httpResp == nil || httpResp.StatusCode != http.StatusNotFound) {
+	if err := notFoundIfHTTP404(err, httpResp); err != nil && !isNotFound(err) {
 		resp.Diagnostics.AddError("Failed to delete allocations", apiErr(err, httpResp))
 	}
 }
@@ -603,18 +557,25 @@ func variantKeyList(m map[string]uuid.UUID) string {
 	for k := range m {
 		keys = append(keys, k)
 	}
+	sort.Strings(keys)
 	return fmt.Sprintf("%v", keys)
 }
 
 // mergeAllocationsResponse takes the typed list returned by the PUT response
 // and fills in computed attributes (id, order_position, type when defaulted)
 // on the matching plan allocations, looked up by their stable `key`.
+//
+// Mismatches between the plan and the response are surfaced as errors so
+// we never silently drop server-side state: a plan key without a response
+// indicates the API rejected or renamed the allocation, and an extra
+// response key indicates the server kept an allocation we did not declare.
 func mergeAllocationsResponse(plan *allocationSetModel, data []datadogV2.AllocationDataResponse, diags *diag.Diagnostics) {
 	byKey := make(map[string]datadogV2.AllocationDataResponse, len(data))
 	for _, a := range data {
 		byKey[a.Attributes.Key] = a
 	}
 
+	seen := make(map[string]struct{}, len(plan.Allocations))
 	for i := range plan.Allocations {
 		key := plan.Allocations[i].Key.ValueString()
 		resp, ok := byKey[key]
@@ -625,10 +586,25 @@ func mergeAllocationsResponse(plan *allocationSetModel, data []datadogV2.Allocat
 			)
 			return
 		}
+		seen[key] = struct{}{}
 		plan.Allocations[i].ID = types.StringValue(resp.Id.String())
 		plan.Allocations[i].OrderPosition = types.Int64Value(resp.Attributes.OrderPosition)
 		if plan.Allocations[i].Type.IsNull() || plan.Allocations[i].Type.IsUnknown() {
 			plan.Allocations[i].Type = types.StringValue(string(resp.Attributes.Type))
 		}
+	}
+
+	extra := make([]string, 0)
+	for key := range byKey {
+		if _, ok := seen[key]; !ok {
+			extra = append(extra, key)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		diags.AddError(
+			"Server returned unexpected allocations",
+			fmt.Sprintf("The API kept allocations not present in the plan: %v. The PUT body may not have been treated as a full replacement; investigate the (flag, environment) before re-running apply.", extra),
+		)
 	}
 }
