@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.0 (2026-05-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* the provider source address changes from TOKIUM/datadog-feature-flags to TOKIUM/ddff. There are no public consumers yet, so no downstream HCL needs updating; the change is flagged as breaking for release-please bookkeeping.
+
+### Features
+
+* **allocation_set:** implement Read drift detection via raw JSON parse ([5d3df95](https://github.com/TOKIUM/terraform-provider-ddff/commit/5d3df951684b8a9658cda474d63ac9f31bc7bc89))
+* **feature_flag_environment:** implement Read drift detection via raw JSON parse ([514876b](https://github.com/TOKIUM/terraform-provider-ddff/commit/514876be93d91f0684655b9e0fff520e6b376654))
+* **provider:** add data.ddff_feature_flag data source ([5ed0f1b](https://github.com/TOKIUM/terraform-provider-ddff/commit/5ed0f1b5c90697a7fb7a5b08c20ea98774620d61))
+* **provider:** add ddff_allocation_set for targeting rules and variant weights ([62c6e56](https://github.com/TOKIUM/terraform-provider-ddff/commit/62c6e567c03ada3de7baf60c2b85bc3a30873d84))
+* **provider:** add ddff_environment resource and data source ([6c0ba8d](https://github.com/TOKIUM/terraform-provider-ddff/commit/6c0ba8dffb59afb10be8ea2cfd30ae469d7478fb))
+* **provider:** add ddff_feature_flag_environment resource ([8338e6f](https://github.com/TOKIUM/terraform-provider-ddff/commit/8338e6f0cb278a3e20f7871769087048165f48df))
+
+
+### Bug Fixes
+
+* **allocation_set:** preserve existing allocation IDs on Update ([21360b5](https://github.com/TOKIUM/terraform-provider-ddff/commit/21360b5deb556462e8ed54f5d186ca0125f1901b))
+* **provider:** emit explicit null for missing timestamps ([0216dc3](https://github.com/TOKIUM/terraform-provider-ddff/commit/0216dc38d9cc58263f7927d52c1aa2a19b2d9a7a))
+* **provider:** make ddff_feature_flag_environment.Read state-preserving ([756de88](https://github.com/TOKIUM/terraform-provider-ddff/commit/756de88ca12d2a1624beaec35b8733e408fc247f))
+
+
+### Documentation
+
+* document v0.1.0 scope and update e2e for new resources ([6059644](https://github.com/TOKIUM/terraform-provider-ddff/commit/6059644f0180697ce82d4f5750ca4eacde8e1ebc))
+* extend README quickstart with allocation_set and fix gofmt ([8cbf8c5](https://github.com/TOKIUM/terraform-provider-ddff/commit/8cbf8c5a1e62094e97da7b21ad65b3e2dc16ce05))
+
+
+### Miscellaneous Chores
+
+* pin initial release to 0.1.0 ([b8fe55d](https://github.com/TOKIUM/terraform-provider-ddff/commit/b8fe55d823ef2eb94450dcbe276bc85aeaad85e5))
+* rename project from terraform-provider-datadog-feature-flags to terraform-provider-ddff ([cbc474a](https://github.com/TOKIUM/terraform-provider-ddff/commit/cbc474a556afc1006f09c1d07ef7d309d6f7e35b))
+
+## Changelog
+
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
