@@ -129,23 +129,22 @@ func (r *featureFlagEnvironmentResource) Create(ctx context.Context, req resourc
 }
 
 func (r *featureFlagEnvironmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	// Read is intentionally a state-preserving no-op.
+	//
+	// The Datadog API embeds the per-environment binding inside the
+	// flag's GET response (`feature_flag_environments[].status`), but
+	// the generated SDK models `FeatureFlagEnvironment.Allocations` as
+	// `map[string]interface{}` while the API actually returns it as an
+	// array as soon as the (flag, environment) pair has any allocation.
+	// Strict JSON unmarshaling fails on that mismatch and the whole
+	// entry collapses into `UnparsedObject`, leaving `EnvironmentId`
+	// zero-valued and making the env lookup falsely return "not found".
+	// Trusting state is the least surprising behavior until the SDK
+	// catches up; Update / Delete still reconcile by hitting the
+	// enable / disable endpoints directly.
 	var state featureFlagEnvironmentModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	flagID, envID, ok := parseFlagEnvIDs(state.FeatureFlagID.ValueString(), state.EnvironmentID.ValueString(), &resp.Diagnostics)
-	if !ok {
-		return
-	}
-
-	if err := r.refreshFromFlag(ctx, flagID, envID, &state); err != nil {
-		if isNotFound(err) {
-			resp.State.RemoveResource(ctx)
-			return
-		}
-		resp.Diagnostics.AddError("Failed to read feature flag environment", err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
