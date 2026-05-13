@@ -148,11 +148,16 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 func (p *ddffProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewFeatureFlagResource,
+		NewEnvironmentResource,
+		NewFeatureFlagEnvironmentResource,
 	}
 }
 
 func (p *ddffProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		NewFeatureFlagDataSource,
+		NewEnvironmentDataSource,
+	}
 }
 
 func stringOrEnv(v types.String, envs ...string) string {
