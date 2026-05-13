@@ -9,6 +9,7 @@ import (
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -16,7 +17,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
-	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 )
 
 var (
@@ -34,16 +34,16 @@ type featureFlagResource struct {
 }
 
 type featureFlagModel struct {
-	ID                types.String `tfsdk:"id"`
-	Key               types.String `tfsdk:"key"`
-	Name              types.String `tfsdk:"name"`
-	Description       types.String `tfsdk:"description"`
-	ValueType         types.String `tfsdk:"value_type"`
-	DefaultVariantKey types.String `tfsdk:"default_variant_key"`
+	ID                types.String         `tfsdk:"id"`
+	Key               types.String         `tfsdk:"key"`
+	Name              types.String         `tfsdk:"name"`
+	Description       types.String         `tfsdk:"description"`
+	ValueType         types.String         `tfsdk:"value_type"`
+	DefaultVariantKey types.String         `tfsdk:"default_variant_key"`
 	JSONSchema        jsontypes.Normalized `tfsdk:"json_schema"`
-	Variants          []variantModel `tfsdk:"variants"`
-	CreatedAt         types.String `tfsdk:"created_at"`
-	UpdatedAt         types.String `tfsdk:"updated_at"`
+	Variants          []variantModel       `tfsdk:"variants"`
+	CreatedAt         types.String         `tfsdk:"created_at"`
+	UpdatedAt         types.String         `tfsdk:"updated_at"`
 }
 
 type variantModel struct {
