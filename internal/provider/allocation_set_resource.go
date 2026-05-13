@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -232,15 +233,184 @@ func (r *allocationSetResource) Create(ctx context.Context, req resource.CreateR
 }
 
 func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	// Datadog exposes no GET endpoint for allocations. Trust state; the
-	// next Update / Delete will overwrite whatever is on the server. See
-	// the resource-level documentation for the drift implication.
 	var state allocationSetModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
+	flagID, envID, ok := parseFlagEnvIDs(state.FeatureFlagID.ValueString(), state.EnvironmentID.ValueString(), &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
+	// Datadog does not expose a typed GET for allocations and the
+	// generated SDK mis-types feature_flag_environments[].allocations
+	// (declared map, actually array), so we hand-roll the parse from
+	// the env entry's UnparsedObject map. On any failure we fall back
+	// to preserving state so drift detection becomes best-effort.
+	allocations, err := r.refreshAllocationsFromFlag(ctx, flagID, envID)
+	if err != nil {
+		if isNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddWarning(
+			"Could not refresh allocations from API",
+			"State was preserved. Underlying cause: "+err.Error(),
+		)
+		resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+		return
+	}
+
+	state.Allocations = allocations
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// refreshAllocationsFromFlag fetches the parent flag, locates the env
+// entry by environment_id, and decodes its allocations array into the
+// typed []allocationModel that mirrors our HCL schema.
+//
+// The function works around two SDK quirks:
+//   - feature_flag_environments[].allocations is declared as a map by
+//     the SDK but returned as an array by the API, which collapses the
+//     entire env entry into UnparsedObject.
+//   - Even when the array shape lines up, Allocation.UnmarshalJSON's
+//     strict mode can reject responses with unknown fields. We re-parse
+//     via plain encoding/json which only fails on real type mismatches.
+func (r *allocationSetResource) refreshAllocationsFromFlag(ctx context.Context, flagID, envID uuid.UUID) ([]allocationModel, error) {
+	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), flagID)
+	if err != nil {
+		if httpResp != nil && httpResp.StatusCode == http.StatusNotFound {
+			return nil, errNotFound
+		}
+		return nil, err
+	}
+
+	wantID := envID.String()
+	for _, env := range res.Data.Attributes.FeatureFlagEnvironments {
+		// Re-marshal the raw env entry (typed or UnparsedObject) so we
+		// can re-parse it with our own relaxed types.
+		var raw map[string]interface{}
+		if env.UnparsedObject != nil {
+			raw = env.UnparsedObject
+		} else {
+			bytes, mErr := json.Marshal(env)
+			if mErr != nil {
+				continue
+			}
+			if uErr := json.Unmarshal(bytes, &raw); uErr != nil {
+				continue
+			}
+		}
+
+		envIDInJSON, _ := raw["environment_id"].(string)
+		if envIDInJSON != wantID {
+			continue
+		}
+
+		// The matching env entry is ours. Pull the allocations slice.
+		allocsRaw, ok := raw["allocations"].([]interface{})
+		if !ok || len(allocsRaw) == 0 {
+			return []allocationModel{}, nil
+		}
+
+		bytes, mErr := json.Marshal(allocsRaw)
+		if mErr != nil {
+			return nil, fmt.Errorf("re-marshal allocations: %w", mErr)
+		}
+
+		var typed []rawAllocation
+		if uErr := json.Unmarshal(bytes, &typed); uErr != nil {
+			return nil, fmt.Errorf("decode allocations: %w", uErr)
+		}
+
+		out := make([]allocationModel, 0, len(typed))
+		for _, a := range typed {
+			model, convErr := rawAllocationToModel(ctx, a)
+			if convErr != nil {
+				return nil, convErr
+			}
+			out = append(out, model)
+		}
+		return out, nil
+	}
+
+	return nil, errNotFound
+}
+
+// rawAllocation mirrors the JSON shape the API actually returns for an
+// allocation, independent of the SDK's typed wrappers (which sometimes
+// fail strict unmarshaling on the fields we care about).
+type rawAllocation struct {
+	ID             string             `json:"id"`
+	Key            string             `json:"key"`
+	Name           string             `json:"name"`
+	Type           string             `json:"type"`
+	OrderPosition  int64              `json:"order_position"`
+	TargetingRules []rawTargetingRule `json:"targeting_rules"`
+	VariantWeights []rawVariantWeight `json:"variant_weights"`
+}
+
+type rawTargetingRule struct {
+	Conditions []rawCondition `json:"conditions"`
+}
+
+type rawCondition struct {
+	Attribute string   `json:"attribute"`
+	Operator  string   `json:"operator"`
+	Value     []string `json:"value"`
+}
+
+type rawVariantWeight struct {
+	Value   float64 `json:"value"`
+	Variant struct {
+		Key string `json:"key"`
+	} `json:"variant"`
+	VariantKey *string `json:"variant_key,omitempty"`
+}
+
+func rawAllocationToModel(ctx context.Context, a rawAllocation) (allocationModel, error) {
+	m := allocationModel{
+		ID:            types.StringValue(a.ID),
+		Key:           types.StringValue(a.Key),
+		Name:          types.StringValue(a.Name),
+		Type:          types.StringValue(a.Type),
+		OrderPosition: types.Int64Value(a.OrderPosition),
+	}
+
+	rules := make([]targetingRuleModel, 0, len(a.TargetingRules))
+	for _, r := range a.TargetingRules {
+		conds := make([]conditionModel, 0, len(r.Conditions))
+		for _, c := range r.Conditions {
+			valueList, d := types.ListValueFrom(ctx, types.StringType, c.Value)
+			if d.HasError() {
+				return m, fmt.Errorf("convert condition.value: %v", d)
+			}
+			conds = append(conds, conditionModel{
+				Attribute: types.StringValue(c.Attribute),
+				Operator:  types.StringValue(c.Operator),
+				Value:     valueList,
+			})
+		}
+		rules = append(rules, targetingRuleModel{Conditions: conds})
+	}
+	m.TargetingRules = rules
+
+	weights := make([]variantWeightModel, 0, len(a.VariantWeights))
+	for _, w := range a.VariantWeights {
+		key := w.Variant.Key
+		if key == "" && w.VariantKey != nil {
+			key = *w.VariantKey
+		}
+		weights = append(weights, variantWeightModel{
+			VariantKey: types.StringValue(key),
+			Value:      types.Float64Value(w.Value),
+		})
+	}
+	m.VariantWeights = weights
+
+	return m, nil
 }
 
 func (r *allocationSetResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
