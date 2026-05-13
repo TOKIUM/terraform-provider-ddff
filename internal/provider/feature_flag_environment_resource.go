@@ -2,10 +2,10 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
-	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -45,7 +45,7 @@ func (r *featureFlagEnvironmentResource) Metadata(_ context.Context, req resourc
 
 func (r *featureFlagEnvironmentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		MarkdownDescription: "Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via `ddff_allocation`.",
+		MarkdownDescription: "Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via `ddff_allocation_set`.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Composite ID `<feature_flag_id>:<environment_id>` used for state addressing.",
@@ -77,11 +77,11 @@ func (r *featureFlagEnvironmentResource) Schema(_ context.Context, _ resource.Sc
 				Computed:            true,
 			},
 			"default_variant_id": schema.StringAttribute{
-				MarkdownDescription: "UUID of the default variant for this environment. Read-only here; set the variant `default_variant_key` on the parent `ddff_feature_flag` resource.",
+				MarkdownDescription: "UUID of the default variant served when no allocation in this environment matches. Set this through the Datadog UI for now; the provider only surfaces the current value for drift detection.",
 				Computed:            true,
 			},
 			"rollout_percentage": schema.Int64Attribute{
-				MarkdownDescription: "Reported rollout percentage for the environment. Manage the rollout through `ddff_allocation` instead.",
+				MarkdownDescription: "Reported rollout percentage for the environment. Manage the rollout through `ddff_allocation_set` instead.",
 				Computed:            true,
 			},
 		},
@@ -129,23 +129,32 @@ func (r *featureFlagEnvironmentResource) Create(ctx context.Context, req resourc
 }
 
 func (r *featureFlagEnvironmentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
-	// Read is intentionally a state-preserving no-op.
-	//
-	// The Datadog API embeds the per-environment binding inside the
-	// flag's GET response (`feature_flag_environments[].status`), but
-	// the generated SDK models `FeatureFlagEnvironment.Allocations` as
-	// `map[string]interface{}` while the API actually returns it as an
-	// array as soon as the (flag, environment) pair has any allocation.
-	// Strict JSON unmarshaling fails on that mismatch and the whole
-	// entry collapses into `UnparsedObject`, leaving `EnvironmentId`
-	// zero-valued and making the env lookup falsely return "not found".
-	// Trusting state is the least surprising behavior until the SDK
-	// catches up; Update / Delete still reconcile by hitting the
-	// enable / disable endpoints directly.
 	var state featureFlagEnvironmentModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	flagID, envID, ok := parseFlagEnvIDs(state.FeatureFlagID.ValueString(), state.EnvironmentID.ValueString(), &resp.Diagnostics)
+	if !ok {
+		return
+	}
+
+	// Pattern D: hand-roll the env entry parse via UnparsedObject because
+	// the generated SDK mis-types feature_flag_environments[].allocations
+	// (declared map, actually array) and collapses the entire entry into
+	// UnparsedObject once any allocation exists. On any failure we fall
+	// back to preserving state so drift detection becomes best-effort
+	// rather than blocking.
+	if err := r.refreshFromFlag(ctx, flagID, envID, &state); err != nil {
+		if isNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
+		resp.Diagnostics.AddWarning(
+			"Could not refresh feature flag environment from API",
+			"State was preserved. Underlying cause: "+err.Error(),
+		)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -208,6 +217,11 @@ func (r *featureFlagEnvironmentResource) setEnabled(ctx context.Context, flagID,
 	return err
 }
 
+// refreshFromFlag fetches the parent flag and locates the (env_id) entry
+// inside feature_flag_environments[], populating the model's computed
+// fields. The lookup is done against the raw JSON to side-step the SDK
+// regression that collapses env entries into UnparsedObject when they
+// have allocations.
 func (r *featureFlagEnvironmentResource) refreshFromFlag(ctx context.Context, flagID, envID uuid.UUID, m *featureFlagEnvironmentModel) error {
 	res, httpResp, err := r.clients.FeatureFlags.GetFeatureFlag(r.clients.Context(ctx), flagID)
 	if err != nil {
@@ -217,26 +231,54 @@ func (r *featureFlagEnvironmentResource) refreshFromFlag(ctx context.Context, fl
 		return err
 	}
 
+	wantID := envID.String()
 	for _, env := range res.Data.Attributes.FeatureFlagEnvironments {
-		if env.EnvironmentId == envID {
-			applyFlagEnvironmentToModel(env, m)
-			return nil
+		var raw map[string]interface{}
+		if env.UnparsedObject != nil {
+			raw = env.UnparsedObject
+		} else {
+			bytes, mErr := json.Marshal(env)
+			if mErr != nil {
+				continue
+			}
+			if uErr := json.Unmarshal(bytes, &raw); uErr != nil {
+				continue
+			}
 		}
+
+		envIDInJSON, _ := raw["environment_id"].(string)
+		if envIDInJSON != wantID {
+			continue
+		}
+
+		applyRawFlagEnvironmentToModel(raw, m)
+		return nil
 	}
 	return errNotFound
 }
 
-func applyFlagEnvironmentToModel(env datadogV2.FeatureFlagEnvironment, m *featureFlagEnvironmentModel) {
-	m.Status = types.StringValue(string(env.Status))
-	m.Enabled = types.BoolValue(env.Status == datadogV2.FEATUREFLAGSTATUS_ENABLED)
-	if env.DefaultVariantId.IsSet() && env.DefaultVariantId.Get() != nil {
-		m.DefaultVariantID = types.StringValue(*env.DefaultVariantId.Get())
-	} else {
+// applyRawFlagEnvironmentToModel writes the status / default_variant_id /
+// rollout_percentage / derived enabled bit from the raw env entry into the
+// Plugin Framework model. Each field is read defensively and falls back
+// to null when the JSON shape is unexpected.
+func applyRawFlagEnvironmentToModel(raw map[string]interface{}, m *featureFlagEnvironmentModel) {
+	status, _ := raw["status"].(string)
+	m.Status = types.StringValue(status)
+	m.Enabled = types.BoolValue(status == "ENABLED")
+
+	switch v := raw["default_variant_id"].(type) {
+	case string:
+		m.DefaultVariantID = types.StringValue(v)
+	default:
 		m.DefaultVariantID = types.StringNull()
 	}
-	if env.RolloutPercentage != nil {
-		m.RolloutPercentage = types.Int64Value(*env.RolloutPercentage)
-	} else {
+
+	switch v := raw["rollout_percentage"].(type) {
+	case float64:
+		m.RolloutPercentage = types.Int64Value(int64(v))
+	case int64:
+		m.RolloutPercentage = types.Int64Value(v)
+	default:
 		m.RolloutPercentage = types.Int64Null()
 	}
 }
