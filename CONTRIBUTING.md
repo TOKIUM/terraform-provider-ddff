@@ -11,8 +11,8 @@ Thanks for your interest in contributing.
 ## Getting started
 
 ```bash
-git clone https://github.com/TOKIUM/terraform-provider-datadog-feature-flags.git
-cd terraform-provider-datadog-feature-flags
+git clone https://github.com/TOKIUM/terraform-provider-ddff.git
+cd terraform-provider-ddff
 go build ./...
 go test ./...
 ```

@@ -21,7 +21,7 @@
   ],
   "packages": {
     ".": {
-      "package-name": "terraform-provider-datadog-feature-flags"
+      "package-name": "terraform-provider-ddff"
     }
   }
 }

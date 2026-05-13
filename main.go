@@ -7,7 +7,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 
-	"github.com/TOKIUM/terraform-provider-datadog-feature-flags/internal/provider"
+	"github.com/TOKIUM/terraform-provider-ddff/internal/provider"
 )
 
 var version = "dev"
@@ -18,7 +18,7 @@ func main() {
 	flag.Parse()
 
 	opts := providerserver.ServeOpts{
-		Address: "registry.terraform.io/TOKIUM/datadog-feature-flags",
+		Address: "registry.terraform.io/TOKIUM/ddff",
 		Debug:   debug,
 	}
 

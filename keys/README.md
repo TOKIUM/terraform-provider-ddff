@@ -8,8 +8,8 @@ Anyone verifying a downloaded release can:
 
 ```bash
 gpg --import keys/release-signing.asc
-gpg --verify terraform-provider-datadog-feature-flags_<version>_SHA256SUMS.sig \
-              terraform-provider-datadog-feature-flags_<version>_SHA256SUMS
+gpg --verify terraform-provider-ddff_<version>_SHA256SUMS.sig \
+              terraform-provider-ddff_<version>_SHA256SUMS
 ```
 
 The Terraform Registry verifies the same signature automatically when it

@@ -132,7 +132,7 @@ func (p *ddffProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	}
 
 	configuration := datadog.NewConfiguration()
-	configuration.UserAgent = "terraform-provider-datadog-feature-flags/" + p.version
+	configuration.UserAgent = "terraform-provider-ddff/" + p.version
 	apiClient := datadog.NewAPIClient(configuration)
 
 	clients := &Clients{

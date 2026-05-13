@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     ddff = {
-      source  = "TOKIUM/datadog-feature-flags"
+      source  = "TOKIUM/ddff"
       version = "~> 0.1"
     }
   }

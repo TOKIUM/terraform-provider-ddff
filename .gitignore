@@ -1,5 +1,5 @@
-terraform-provider-datadog-feature-flags
-terraform-provider-datadog-feature-flags_*
+terraform-provider-ddff
+terraform-provider-ddff_*
 *.exe
 *.test
 *.out

@@ -1,9 +1,9 @@
-# The binary suffix (datadog-feature-flags) is the Registry slug, but the
-# provider's HCL type / resource prefix is `ddff`. tfplugindocs needs the
-# resource prefix to discover schemas correctly.
+# PROVIDER_NAME is both the Registry slug suffix and the resource type
+# prefix (set via provider.Metadata.TypeName). They must match for
+# tfplugindocs to discover the schemas.
 PROVIDER_NAME ?= ddff
 
-.PHONY: build test vet fmt docs
+.PHONY: build test vet fmt docs docs-validate
 
 build:
 	go build ./...
@@ -24,7 +24,7 @@ fmt:
 docs:
 	go tool tfplugindocs generate \
 		--provider-name $(PROVIDER_NAME) \
-		--rendered-provider-name "Datadog Feature Flags"
+		--rendered-provider-name "ddff"
 
 # Validates that docs/, examples/, and templates/ are consistent with each
 # other (used in CI to detect uncommitted regeneration).
