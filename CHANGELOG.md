@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.1.0 (2026-05-13)
+
+
+### Features
+
+* **provider:** add data.ddff_feature_flag data source ([5ed0f1b](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/5ed0f1b5c90697a7fb7a5b08c20ea98774620d61))
+* **provider:** add ddff_environment resource and data source ([6c0ba8d](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/6c0ba8dffb59afb10be8ea2cfd30ae469d7478fb))
+* **provider:** add ddff_feature_flag_environment resource ([8338e6f](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/8338e6f0cb278a3e20f7871769087048165f48df))
+
+
+### Bug Fixes
+
+* **provider:** emit explicit null for missing timestamps ([0216dc3](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/0216dc38d9cc58263f7927d52c1aa2a19b2d9a7a))
+
+
+### Documentation
+
+* document v0.1.0 scope and update e2e for new resources ([6059644](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/6059644f0180697ce82d4f5750ca4eacde8e1ebc))
+
+
+### Miscellaneous Chores
+
+* pin initial release to 0.1.0 ([91dd39d](https://github.com/TOKIUM/terraform-provider-datadog-feature-flags/commit/91dd39df827a636e9c627b877f2796ccbcc46bdd))
+
+## Changelog
+
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
