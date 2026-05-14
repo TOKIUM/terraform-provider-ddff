@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
+	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
@@ -15,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -45,13 +48,43 @@ type allocationSetModel struct {
 }
 
 type allocationModel struct {
-	ID             types.String         `tfsdk:"id"`
-	Key            types.String         `tfsdk:"key"`
-	Name           types.String         `tfsdk:"name"`
-	Type           types.String         `tfsdk:"type"`
-	OrderPosition  types.Int64          `tfsdk:"order_position"`
-	TargetingRules []targetingRuleModel `tfsdk:"targeting_rule"`
-	VariantWeights []variantWeightModel `tfsdk:"variant_weight"`
+	ID               types.String           `tfsdk:"id"`
+	Key              types.String           `tfsdk:"key"`
+	Name             types.String           `tfsdk:"name"`
+	Type             types.String           `tfsdk:"type"`
+	OrderPosition    types.Int64            `tfsdk:"order_position"`
+	TargetingRules   []targetingRuleModel   `tfsdk:"targeting_rule"`
+	VariantWeights   []variantWeightModel   `tfsdk:"variant_weight"`
+	ExposureSchedule *exposureScheduleModel `tfsdk:"exposure_schedule"`
+}
+
+// exposureScheduleModel is exposed as a `exposure_schedule` SingleNestedBlock.
+// Block syntax (vs attribute) means a missing block decodes to a nil pointer
+// rather than an "unknown" value, which the framework cannot represent in a
+// Go struct field. As a consequence, drift detection is opt-in: a user who
+// does not declare the block will not see UI-side changes surface in plan.
+type exposureScheduleModel struct {
+	ID                types.String         `tfsdk:"id"`
+	AllocationID      types.String         `tfsdk:"allocation_id"`
+	ControlVariantID  types.String         `tfsdk:"control_variant_id"`
+	AbsoluteStartTime types.String         `tfsdk:"absolute_start_time"`
+	RolloutOptions    *rolloutOptionsModel `tfsdk:"rollout_options"`
+	RolloutSteps      []rolloutStepModel   `tfsdk:"rollout_step"`
+}
+
+type rolloutOptionsModel struct {
+	Strategy            types.String `tfsdk:"strategy"`
+	Autostart           types.Bool   `tfsdk:"autostart"`
+	SelectionIntervalMs types.Int64  `tfsdk:"selection_interval_ms"`
+}
+
+type rolloutStepModel struct {
+	ID               types.String  `tfsdk:"id"`
+	OrderPosition    types.Int64   `tfsdk:"order_position"`
+	ExposureRatio    types.Float64 `tfsdk:"exposure_ratio"`
+	IntervalMs       types.Int64   `tfsdk:"interval_ms"`
+	IsPauseRecord    types.Bool    `tfsdk:"is_pause_record"`
+	GroupedStepIndex types.Int64   `tfsdk:"grouped_step_index"`
 }
 
 type targetingRuleModel struct {
@@ -82,9 +115,10 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 			"the flag's `default_variant_key` is returned instead." +
 			"\n\n" +
 			"The Datadog API replaces the entire allocation list for a (flag, environment) pair on every write and exposes no " +
-			"dedicated read endpoint, so this resource owns the complete list. Drift caused by edits made in the Datadog UI is " +
-			"not detected by `terraform plan`; the next `terraform apply` overwrites whatever is on the server with the state " +
-			"recorded by Terraform.",
+			"dedicated read endpoint. The provider recovers the current allocation list by parsing the parent flag's JSON, so " +
+			"targeting rules, variant weights, allocation type, and (when declared) the `exposure_schedule` block all surface " +
+			"as drift on `terraform plan`. The `exposure_schedule` block is opt-in: an allocation that does not declare it " +
+			"will not surface UI-side changes to the schedule.",
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "Composite ID `<feature_flag_id>:<environment_id>` used for state addressing.",
@@ -116,6 +150,9 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 						"id": schema.StringAttribute{
 							MarkdownDescription: "UUID assigned by the API on create.",
 							Computed:            true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 						"key": schema.StringAttribute{
 							MarkdownDescription: "Stable, human-readable key for this allocation. Must be unique within the (flag, environment) set.",
@@ -137,9 +174,49 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 						"order_position": schema.Int64Attribute{
 							MarkdownDescription: "Server-assigned evaluation order within the environment, derived from the declaration order in this block list.",
 							Computed:            true,
+							PlanModifiers: []planmodifier.Int64{
+								int64planmodifier.UseStateForUnknown(),
+							},
 						},
 					},
 					Blocks: map[string]schema.Block{
+						"exposure_schedule": schema.SingleNestedBlock{
+							MarkdownDescription: "Progressive (traffic exposure) rollout schedule attached to this allocation. Declare the block to manage rollout_options and rollout_steps via Terraform; omit it to leave drift detection off for this allocation. Server-assigned ids (schedule id, step ids) and computed fields are refreshed on every write.",
+							Attributes: map[string]schema.Attribute{
+								"id":                  schema.StringAttribute{Computed: true},
+								"allocation_id":       schema.StringAttribute{Computed: true},
+								"control_variant_id":  schema.StringAttribute{Optional: true, Computed: true},
+								"absolute_start_time": schema.StringAttribute{Optional: true, Computed: true},
+							},
+							Blocks: map[string]schema.Block{
+								"rollout_options": schema.SingleNestedBlock{
+									Attributes: map[string]schema.Attribute{
+										"strategy": schema.StringAttribute{
+											Optional:            true,
+											Computed:            true,
+											MarkdownDescription: "Rollout cadence. One of `UNIFORM_INTERVALS` (all `rollout_step` blocks share `selection_interval_ms`) or `NO_ROLLOUT` (single step at 100 %). Required when the parent `exposure_schedule` block is declared.",
+											Validators: []validator.String{
+												stringvalidator.OneOf("UNIFORM_INTERVALS", "NO_ROLLOUT"),
+											},
+										},
+										"autostart":             schema.BoolAttribute{Optional: true, Computed: true},
+										"selection_interval_ms": schema.Int64Attribute{Optional: true, Computed: true},
+									},
+								},
+								"rollout_step": schema.ListNestedBlock{
+									NestedObject: schema.NestedBlockObject{
+										Attributes: map[string]schema.Attribute{
+											"id":                 schema.StringAttribute{Computed: true},
+											"order_position":     schema.Int64Attribute{Computed: true},
+											"exposure_ratio":     schema.Float64Attribute{Optional: true, Computed: true},
+											"interval_ms":        schema.Int64Attribute{Optional: true, Computed: true},
+											"is_pause_record":    schema.BoolAttribute{Optional: true, Computed: true},
+											"grouped_step_index": schema.Int64Attribute{Optional: true, Computed: true},
+										},
+									},
+								},
+							},
+						},
 						"targeting_rule": schema.ListNestedBlock{
 							MarkdownDescription: "Conjunction of conditions that determines whether this allocation applies to the evaluation context. All conditions inside one targeting_rule must match (AND); multiple targeting_rule blocks act as alternatives (OR).",
 							NestedObject: schema.NestedBlockObject{
@@ -254,8 +331,28 @@ func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadReque
 		return
 	}
 
+	mergeAllocationsRead(state.Allocations, allocations)
 	state.Allocations = allocations
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+// mergeAllocationsRead reconciles fresh server-side allocations with the
+// prior state. exposure_schedule is opt-in (block syntax): if the user never
+// declared it for an allocation, the prior state has ExposureSchedule == nil
+// and we drop the value the API returned so the state continues to match the
+// declared config. Allocations are matched by key; missing matches keep the
+// fresh value.
+func mergeAllocationsRead(prior, fresh []allocationModel) {
+	priorByKey := make(map[string]*allocationModel, len(prior))
+	for i := range prior {
+		priorByKey[prior[i].Key.ValueString()] = &prior[i]
+	}
+	for i := range fresh {
+		p, ok := priorByKey[fresh[i].Key.ValueString()]
+		if !ok || p.ExposureSchedule == nil {
+			fresh[i].ExposureSchedule = nil
+		}
+	}
 }
 
 // refreshAllocationsFromFlag fetches the parent flag, locates the env
@@ -297,13 +394,14 @@ func (r *allocationSetResource) refreshAllocationsFromFlag(ctx context.Context, 
 // allocation, independent of the SDK's typed wrappers (which sometimes
 // fail strict unmarshaling on the fields we care about).
 type rawAllocation struct {
-	ID             string             `json:"id"`
-	Key            string             `json:"key"`
-	Name           string             `json:"name"`
-	Type           string             `json:"type"`
-	OrderPosition  int64              `json:"order_position"`
-	TargetingRules []rawTargetingRule `json:"targeting_rules"`
-	VariantWeights []rawVariantWeight `json:"variant_weights"`
+	ID               string               `json:"id"`
+	Key              string               `json:"key"`
+	Name             string               `json:"name"`
+	Type             string               `json:"type"`
+	OrderPosition    int64                `json:"order_position"`
+	TargetingRules   []rawTargetingRule   `json:"targeting_rules"`
+	VariantWeights   []rawVariantWeight   `json:"variant_weights"`
+	ExposureSchedule *rawExposureSchedule `json:"exposure_schedule,omitempty"`
 }
 
 type rawTargetingRule struct {
@@ -322,6 +420,30 @@ type rawVariantWeight struct {
 		Key string `json:"key"`
 	} `json:"variant"`
 	VariantKey *string `json:"variant_key,omitempty"`
+}
+
+type rawExposureSchedule struct {
+	ID                string             `json:"id"`
+	AllocationID      string             `json:"allocation_id"`
+	ControlVariantID  *string            `json:"control_variant_id"`
+	AbsoluteStartTime *string            `json:"absolute_start_time"`
+	RolloutOptions    *rawRolloutOptions `json:"rollout_options"`
+	RolloutSteps      []rawRolloutStep   `json:"rollout_steps"`
+}
+
+type rawRolloutOptions struct {
+	Strategy            string `json:"strategy"`
+	Autostart           bool   `json:"autostart"`
+	SelectionIntervalMs int64  `json:"selection_interval_ms"`
+}
+
+type rawRolloutStep struct {
+	ID               string  `json:"id"`
+	OrderPosition    int64   `json:"order_position"`
+	ExposureRatio    float64 `json:"exposure_ratio"`
+	IntervalMs       *int64  `json:"interval_ms"`
+	IsPauseRecord    bool    `json:"is_pause_record"`
+	GroupedStepIndex int64   `json:"grouped_step_index"`
 }
 
 func rawAllocationToModel(ctx context.Context, a rawAllocation) (allocationModel, error) {
@@ -364,7 +486,54 @@ func rawAllocationToModel(ctx context.Context, a rawAllocation) (allocationModel
 	}
 	m.VariantWeights = weights
 
+	if a.ExposureSchedule != nil {
+		m.ExposureSchedule = rawExposureScheduleToModel(*a.ExposureSchedule)
+	}
+
 	return m, nil
+}
+
+func rawExposureScheduleToModel(s rawExposureSchedule) *exposureScheduleModel {
+	out := &exposureScheduleModel{
+		ID:                types.StringValue(s.ID),
+		AllocationID:      types.StringValue(s.AllocationID),
+		ControlVariantID:  nullableString(s.ControlVariantID),
+		AbsoluteStartTime: nullableString(s.AbsoluteStartTime),
+	}
+	if s.RolloutOptions != nil {
+		out.RolloutOptions = &rolloutOptionsModel{
+			Strategy:            types.StringValue(s.RolloutOptions.Strategy),
+			Autostart:           types.BoolValue(s.RolloutOptions.Autostart),
+			SelectionIntervalMs: types.Int64Value(s.RolloutOptions.SelectionIntervalMs),
+		}
+	}
+	steps := make([]rolloutStepModel, 0, len(s.RolloutSteps))
+	for _, st := range s.RolloutSteps {
+		steps = append(steps, rolloutStepModel{
+			ID:               types.StringValue(st.ID),
+			OrderPosition:    types.Int64Value(st.OrderPosition),
+			ExposureRatio:    types.Float64Value(st.ExposureRatio),
+			IntervalMs:       nullableInt64(st.IntervalMs),
+			IsPauseRecord:    types.BoolValue(st.IsPauseRecord),
+			GroupedStepIndex: types.Int64Value(st.GroupedStepIndex),
+		})
+	}
+	out.RolloutSteps = steps
+	return out
+}
+
+func nullableString(p *string) types.String {
+	if p == nil {
+		return types.StringNull()
+	}
+	return types.StringValue(*p)
+}
+
+func nullableInt64(p *int64) types.Int64 {
+	if p == nil {
+		return types.Int64Null()
+	}
+	return types.Int64Value(*p)
 }
 
 func (r *allocationSetResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -441,6 +610,21 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 		return
 	}
 
+	// Refresh from raw JSON to capture fields not surfaced by the typed PUT
+	// response (notably exposure_schedule). For allocations where the user
+	// did not declare exposure_schedule in HCL, we drop the server-side
+	// value to keep state aligned with config (block syntax is opt-in).
+	fresh, refreshErr := r.refreshAllocationsFromFlag(ctx, flagID, envID)
+	if refreshErr != nil {
+		diags.AddWarning(
+			"Could not refresh allocations after write",
+			"State will reflect the PUT response only. Underlying cause: "+refreshErr.Error(),
+		)
+	} else {
+		mergeAllocationsRead(plan.Allocations, fresh)
+		plan.Allocations = fresh
+	}
+
 	diags.Append(state.Set(ctx, plan)...)
 }
 
@@ -487,6 +671,14 @@ func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKe
 			TargetingRules: targetingRules,
 			VariantWeights: variantWeights,
 		}
+		if a.ExposureSchedule != nil {
+			es, d := buildExposureSchedule(a.ExposureSchedule)
+			diags.Append(d...)
+			if diags.HasError() {
+				return body, diags
+			}
+			attrs.ExposureSchedule = es
+		}
 		// Pass the existing allocation's UUID through when we know it
 		// (i.e. on Update), so the server treats this as an update of an
 		// existing record instead of creating a duplicate and rejecting
@@ -525,6 +717,82 @@ func buildTargetingRules(ctx context.Context, rules []targetingRuleModel) ([]dat
 		}
 		out = append(out, datadogV2.TargetingRuleRequest{Conditions: conditions})
 	}
+	return out, diags
+}
+
+func buildExposureSchedule(s *exposureScheduleModel) (*datadogV2.ExposureScheduleRequest, diag.Diagnostics) {
+	var diags diag.Diagnostics
+	if s.RolloutOptions == nil {
+		diags.AddError("Invalid exposure_schedule", "rollout_options is required when exposure_schedule is declared")
+		return nil, diags
+	}
+	if s.RolloutOptions.Strategy.IsNull() || s.RolloutOptions.Strategy.IsUnknown() || s.RolloutOptions.Strategy.ValueString() == "" {
+		diags.AddError("Invalid exposure_schedule", "rollout_options.strategy is required when exposure_schedule is declared")
+		return nil, diags
+	}
+
+	out := &datadogV2.ExposureScheduleRequest{
+		RolloutOptions: datadogV2.RolloutOptionsRequest{
+			Strategy: datadogV2.RolloutStrategy(s.RolloutOptions.Strategy.ValueString()),
+		},
+	}
+	if !s.RolloutOptions.Autostart.IsNull() && !s.RolloutOptions.Autostart.IsUnknown() {
+		v := s.RolloutOptions.Autostart.ValueBool()
+		out.RolloutOptions.Autostart = *datadog.NewNullableBool(&v)
+	}
+	if !s.RolloutOptions.SelectionIntervalMs.IsNull() && !s.RolloutOptions.SelectionIntervalMs.IsUnknown() {
+		v := s.RolloutOptions.SelectionIntervalMs.ValueInt64()
+		out.RolloutOptions.SelectionIntervalMs = &v
+	}
+
+	if !s.ControlVariantID.IsNull() && !s.ControlVariantID.IsUnknown() {
+		v := s.ControlVariantID.ValueString()
+		out.ControlVariantId = *datadog.NewNullableString(&v)
+	}
+	if !s.AbsoluteStartTime.IsNull() && !s.AbsoluteStartTime.IsUnknown() {
+		raw := s.AbsoluteStartTime.ValueString()
+		t, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			diags.AddError("Invalid absolute_start_time", fmt.Sprintf("expected RFC3339 timestamp, got %q: %v", raw, err))
+			return nil, diags
+		}
+		out.AbsoluteStartTime = *datadog.NewNullableTime(&t)
+	}
+	if !s.ID.IsNull() && !s.ID.IsUnknown() && s.ID.ValueString() != "" {
+		if id, parseErr := uuid.Parse(s.ID.ValueString()); parseErr == nil {
+			idCopy := id
+			out.Id = &idCopy
+		}
+	}
+
+	steps := make([]datadogV2.ExposureRolloutStepRequest, 0, len(s.RolloutSteps))
+	for i, st := range s.RolloutSteps {
+		isPause := false
+		if !st.IsPauseRecord.IsNull() && !st.IsPauseRecord.IsUnknown() {
+			isPause = st.IsPauseRecord.ValueBool()
+		}
+		gsi := int64(i)
+		if !st.GroupedStepIndex.IsNull() && !st.GroupedStepIndex.IsUnknown() {
+			gsi = st.GroupedStepIndex.ValueInt64()
+		}
+		step := datadogV2.ExposureRolloutStepRequest{
+			ExposureRatio:    st.ExposureRatio.ValueFloat64(),
+			GroupedStepIndex: gsi,
+			IsPauseRecord:    isPause,
+		}
+		if !st.IntervalMs.IsNull() && !st.IntervalMs.IsUnknown() {
+			v := st.IntervalMs.ValueInt64()
+			step.IntervalMs = *datadog.NewNullableInt64(&v)
+		}
+		if !st.ID.IsNull() && !st.ID.IsUnknown() && st.ID.ValueString() != "" {
+			if id, parseErr := uuid.Parse(st.ID.ValueString()); parseErr == nil {
+				idCopy := id
+				step.Id = &idCopy
+			}
+		}
+		steps = append(steps, step)
+	}
+	out.RolloutSteps = steps
 	return out, diags
 }
 

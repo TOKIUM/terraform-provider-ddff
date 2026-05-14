@@ -143,10 +143,20 @@ The provider does not persist credentials; they are read at apply time only.
   schema before returning it. The provider parses both sides as JSON
   before comparing, so cosmetic differences (whitespace, key order) are
   ignored while structural drift is still detected.
-- **`ddff_allocation_set` does not detect UI-side drift** — The upstream
-  API exposes no dedicated read endpoint for allocations. The resource
-  trusts state and reconciles by overwriting on the next apply; edits
-  made in the Datadog UI will be silently replaced.
+- **`ddff_allocation_set` drift detection is partial** — The upstream
+  API exposes no dedicated read endpoint for allocations; the provider
+  recovers them by parsing the parent flag's JSON. Targeting rules,
+  variant weights, allocation `type`, and (when declared) the
+  `exposure_schedule` block are all surfaced as drift. The
+  `exposure_schedule` block is opt-in: an allocation that does not
+  declare it will not surface UI-side changes to the schedule, on the
+  assumption that Terraform is intentionally not managing it.
+- **`UNIFORM_INTERVALS` overrides per-step interval** — Under
+  `rollout_options.strategy = "UNIFORM_INTERVALS"` the server normalizes
+  every `rollout_step.interval_ms` to `selection_interval_ms`. Set the
+  cadence at the `rollout_options` level; per-step `interval_ms` only
+  has an effect with future custom strategies (the API currently rejects
+  anything other than `UNIFORM_INTERVALS` and `NO_ROLLOUT`).
 
 ## Compatibility
 

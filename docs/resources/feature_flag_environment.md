@@ -3,12 +3,12 @@
 page_title: "ddff_feature_flag_environment Resource - ddff"
 subcategory: ""
 description: |-
-  Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via ddff_allocation.
+  Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via ddff_allocation_set.
 ---
 
 # ddff_feature_flag_environment (Resource)
 
-Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via `ddff_allocation`.
+Controls whether a feature flag is enabled or disabled in a specific environment. Targeting rules and variant weight distribution are managed separately via `ddff_allocation_set`.
 
 ## Example Usage
 
@@ -32,9 +32,9 @@ resource "ddff_feature_flag_environment" "new_checkout_prod" {
 
 ### Read-Only
 
-- `default_variant_id` (String) UUID of the default variant for this environment. Read-only here; set the variant `default_variant_key` on the parent `ddff_feature_flag` resource.
+- `default_variant_id` (String) UUID of the default variant served when no allocation in this environment matches. Set this through the Datadog UI for now; the provider only surfaces the current value for drift detection.
 - `id` (String) Composite ID `<feature_flag_id>:<environment_id>` used for state addressing.
-- `rollout_percentage` (Number) Reported rollout percentage for the environment. Manage the rollout through `ddff_allocation` instead.
+- `rollout_percentage` (Number) Reported rollout percentage for the environment. Manage the rollout through `ddff_allocation_set` instead.
 - `status` (String) Reported status from the API (`ENABLED` or `DISABLED`).
 
 ## Import
