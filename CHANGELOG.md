@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.0...v0.1.1) (2026-05-14)
+
+
+### Features
+
+* **allocation_set:** support exposure_schedule for progressive rollouts ([ee2e03a](https://github.com/TOKIUM/terraform-provider-ddff/commit/ee2e03ab201bdd4f165a27c8bd5387e170a91a5f))
+* **allocation_set:** support exposure_schedule for progressive rollouts ([fa42251](https://github.com/TOKIUM/terraform-provider-ddff/commit/fa422515f10acc578ae04ed557281cdeabedbd62))
+
 ## 0.1.0 (2026-05-13)
 
 
