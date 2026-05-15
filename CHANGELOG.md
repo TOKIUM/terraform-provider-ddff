@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.2](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.1...v0.1.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **allocation_set:** serialise per-environment writes to avoid 409 race ([f2094a7](https://github.com/TOKIUM/terraform-provider-ddff/commit/f2094a7d9078656bd6cf8576ce3cc5e403e7e93f))
+* **allocation_set:** support allocation key rename ([375e27a](https://github.com/TOKIUM/terraform-provider-ddff/commit/375e27a0512c4969238097d033965dda38a4dc8d))
+* **allocation_set:** surface approval gate as actionable error ([ac55fce](https://github.com/TOKIUM/terraform-provider-ddff/commit/ac55fced2327c1e1aa42c7c810c46fb810345778))
+* include response body in apiErr output ([74d9529](https://github.com/TOKIUM/terraform-provider-ddff/commit/74d9529bda3950fd26ee095573856fb17ff0a953))
+
+
+### Documentation
+
+* **allocation_set:** clarify allocation key uniqueness scope ([5c24c43](https://github.com/TOKIUM/terraform-provider-ddff/commit/5c24c43a53983f734454a4c0e742492e3b1efbc7))
+
 ## [0.1.1](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.0...v0.1.1) (2026-05-14)
 
 
