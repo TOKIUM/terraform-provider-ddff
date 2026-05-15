@@ -166,7 +166,10 @@ resource "ddff_allocation_set" "boolean_e2e" {
   environment_id  = ddff_environment.e2e.id
 
   allocation {
-    key  = "tier-allowlist"
+    # Allocation keys are unique across the entire Datadog workspace, so
+    # scope the key with the flag name to avoid colliding with anything
+    # else in the org during a `make lifecycle` run.
+    key  = "ddff_e2e_boolean-tier-allowlist"
     name = "Allowed customer tiers"
     type = "FEATURE_GATE"
 

@@ -155,7 +155,7 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 						"key": schema.StringAttribute{
-							MarkdownDescription: "Stable, human-readable key for this allocation. Must be unique within the (flag, environment) set.",
+							MarkdownDescription: "Stable, human-readable key for this allocation. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair.",
 							Required:            true,
 						},
 						"name": schema.StringAttribute{
@@ -297,7 +297,7 @@ func (r *allocationSetResource) Create(ctx context.Context, req resource.CreateR
 		return
 	}
 
-	r.putAndReconcile(ctx, &plan, &resp.Diagnostics, &resp.State, false)
+	r.putAndReconcile(ctx, &plan, nil, &resp.Diagnostics, &resp.State, false)
 }
 
 func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -543,7 +543,19 @@ func (r *allocationSetResource) Update(ctx context.Context, req resource.UpdateR
 		return
 	}
 
-	r.putAndReconcile(ctx, &plan, &resp.Diagnostics, &resp.State, true)
+	// The prior state's (key -> UUID) map is what tells putAndReconcile
+	// which planned allocations should be updated in place vs. created
+	// fresh. Renaming an allocation's key drops it out of the prior map,
+	// so the UUID is omitted from the PUT body and the API creates a
+	// new allocation under the new key (with the PUT-replace semantics
+	// retiring the old one).
+	var state allocationSetModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	r.putAndReconcile(ctx, &plan, state.Allocations, &resp.Diagnostics, &resp.State, true)
 }
 
 func (r *allocationSetResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
@@ -557,6 +569,9 @@ func (r *allocationSetResource) Delete(ctx context.Context, req resource.DeleteR
 	if !ok {
 		return
 	}
+
+	unlock := r.clients.LockEnv(envID)
+	defer unlock()
 
 	body := datadogV2.OverwriteAllocationsRequest{Data: []datadogV2.AllocationDataRequest{}}
 	_, httpResp, err := r.clients.FeatureFlags.UpdateAllocationsForFeatureFlagInEnvironment(r.clients.Context(ctx), flagID, envID, body)
@@ -572,12 +587,23 @@ func (r *allocationSetResource) ImportState(ctx context.Context, req resource.Im
 // putAndReconcile performs the shared logic between Create and Update: build
 // the PUT body from plan, call the API, map the typed response back into the
 // plan struct (including server-assigned IDs / order positions), and write it
-// to state. isUpdate is informational only.
-func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *allocationSetModel, diags *diag.Diagnostics, state *tfsdk.State, isUpdate bool) {
+// to state.
+//
+// prior is the previous state's allocation list (nil on Create); its
+// (key -> UUID) projection determines which planned allocations are sent
+// as in-place updates and which are sent as fresh creates. See
+// buildOverwriteBody for the consequences when a key has been renamed.
+func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *allocationSetModel, prior []allocationModel, diags *diag.Diagnostics, state *tfsdk.State, isUpdate bool) {
 	flagID, envID, ok := parseFlagEnvIDs(plan.FeatureFlagID.ValueString(), plan.EnvironmentID.ValueString(), diags)
 	if !ok {
 		return
 	}
+
+	// Serialise concurrent writes to the same environment: the
+	// allocations endpoint returns a transient 409 when two parallel
+	// writes hit the same env_id, even for distinct feature_flag_ids.
+	unlock := r.clients.LockEnv(envID)
+	defer unlock()
 
 	// The Datadog API expects variant_weights to include the variant's
 	// UUID, not just its key. Resolve the (key -> id) mapping by fetching
@@ -588,7 +614,7 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 		return
 	}
 
-	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID)
+	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID, priorKeyToID(prior))
 	diags.Append(buildDiags...)
 	if diags.HasError() {
 		return
@@ -601,6 +627,19 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 			op = "update"
 		}
 		diags.AddError("Failed to "+op+" allocations", apiErr(err, httpResp))
+		return
+	}
+
+	// The API occasionally returns 200 OK with an empty response when the
+	// environment has `require_feature_flag_approval = true`: the PUT is
+	// rejected silently because the change needs human approval. Surface
+	// that case explicitly so users do not interpret it as a provider bug.
+	if len(res.Data) == 0 && len(plan.Allocations) > 0 {
+		diags.AddError(
+			"Allocation write was silently dropped",
+			"PUT to allocations returned 200 OK but no allocations were created. "+
+				approvalHint(ctx, r.clients, flagID, envID),
+		)
 		return
 	}
 
@@ -644,9 +683,36 @@ func (r *allocationSetResource) variantKeyToID(ctx context.Context, flagID uuid.
 	return out, diags
 }
 
+// priorKeyToID projects the previous state's allocation list into a
+// (key -> server UUID) map used by buildOverwriteBody to decide which
+// planned allocations should be sent as in-place updates and which as
+// fresh creates. Returns nil when there is no prior state (Create).
+func priorKeyToID(prior []allocationModel) map[string]uuid.UUID {
+	if len(prior) == 0 {
+		return nil
+	}
+	out := make(map[string]uuid.UUID, len(prior))
+	for _, a := range prior {
+		if a.ID.IsNull() || a.ID.IsUnknown() || a.ID.ValueString() == "" {
+			continue
+		}
+		id, err := uuid.Parse(a.ID.ValueString())
+		if err != nil {
+			continue
+		}
+		out[a.Key.ValueString()] = id
+	}
+	return out
+}
+
 // buildOverwriteBody converts the planned allocation list into the
-// OverwriteAllocationsRequest expected by the SDK.
-func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKeyToID map[string]uuid.UUID) (datadogV2.OverwriteAllocationsRequest, diag.Diagnostics) {
+// OverwriteAllocationsRequest expected by the SDK. priorKeyToID is the
+// previous state's (key -> UUID) projection: an entry there means
+// "update this allocation in place"; its absence means "create fresh".
+// Renaming a key drops it from priorKeyToID, which is what makes
+// key-rename plans succeed (the API silently ignores key changes when
+// the existing UUID is provided alongside).
+func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKeyToID map[string]uuid.UUID, priorKeyToID map[string]uuid.UUID) (datadogV2.OverwriteAllocationsRequest, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	body := datadogV2.OverwriteAllocationsRequest{
 		Data: make([]datadogV2.AllocationDataRequest, 0, len(allocs)),
@@ -679,15 +745,13 @@ func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKe
 			}
 			attrs.ExposureSchedule = es
 		}
-		// Pass the existing allocation's UUID through when we know it
-		// (i.e. on Update), so the server treats this as an update of an
-		// existing record instead of creating a duplicate and rejecting
-		// the conflicting key with 409.
-		if !a.ID.IsNull() && !a.ID.IsUnknown() && a.ID.ValueString() != "" {
-			if id, parseErr := uuid.Parse(a.ID.ValueString()); parseErr == nil {
-				idCopy := id
-				attrs.Id = &idCopy
-			}
+		// Pass the existing allocation's UUID through only when the plan
+		// key matches a prior-state key. The API silently keeps the old
+		// key when an UUID is supplied alongside a new one, so a rename
+		// must look like a fresh create from the API's point of view.
+		if id, ok := priorKeyToID[a.Key.ValueString()]; ok {
+			idCopy := id
+			attrs.Id = &idCopy
 		}
 		body.Data = append(body.Data, datadogV2.AllocationDataRequest{
 			Type:       datadogV2.ALLOCATIONDATATYPE_ALLOCATIONS,

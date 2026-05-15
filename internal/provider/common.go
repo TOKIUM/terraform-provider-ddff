@@ -20,13 +20,26 @@ import (
 // parsing and avoids state churn from format differences.
 const timeFormat = "2006-01-02T15:04:05Z07:00"
 
-// apiErr formats an SDK error along with the HTTP status code when one
-// is available.
+// apiErr formats an SDK error along with the HTTP status code and, when
+// the SDK error carries one, the raw response body. The body is what
+// actually identifies a Datadog failure (e.g. `allocation with this key
+// already exists`) — without it callers only see a bare status code and
+// have to reproduce the call manually to learn what went wrong.
 func apiErr(err error, httpResp *http.Response) string {
-	if httpResp == nil {
-		return err.Error()
+	if err == nil {
+		return ""
 	}
-	return fmt.Sprintf("%s (status %d)", err.Error(), httpResp.StatusCode)
+	msg := err.Error()
+	if httpResp != nil {
+		msg = fmt.Sprintf("%s (status %d)", msg, httpResp.StatusCode)
+	}
+	var genErr datadog.GenericOpenAPIError
+	if errors.As(err, &genErr) {
+		if body := genErr.Body(); len(body) > 0 {
+			msg = fmt.Sprintf("%s: %s", msg, string(body))
+		}
+	}
+	return msg
 }
 
 // errNotFound is returned when a resource was looked up by ID but the
@@ -110,6 +123,22 @@ func nullableStringToTF(v datadog.NullableString) types.String {
 		return types.StringNull()
 	}
 	return types.StringValue(*v.Get())
+}
+
+// approvalHint inspects the (flag, env) entry to find out whether the
+// environment requires feature flag approval, and returns a sentence
+// suitable for appending to an error diagnostic. The hint is best-effort:
+// if the lookup fails for any reason we say so plainly rather than
+// pretending to know the answer.
+func approvalHint(ctx context.Context, c *Clients, flagID, envID uuid.UUID) string {
+	raw, err := c.findRawEnvEntry(ctx, flagID, envID)
+	if err != nil {
+		return fmt.Sprintf("Could not verify the environment's approval setting (%s); inspect the environment in the Datadog UI for require_feature_flag_approval.", err.Error())
+	}
+	if approval, _ := raw["require_feature_flag_approval"].(bool); approval {
+		return "The environment has require_feature_flag_approval=true, so allocation changes from the API must go through the Datadog UI approval workflow. Either complete the initial allocation set-up with require_feature_flag_approval=false and re-enable it afterwards, or apply the change through the UI."
+	}
+	return "Approval is disabled on this environment, so the change was not blocked by the approval gate. Re-running the apply may surface a different diagnostic."
 }
 
 // findRawEnvEntry fetches the parent feature flag and locates the env

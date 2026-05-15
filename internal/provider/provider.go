@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"sync"
 
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadog"
 	"github.com/DataDog/datadog-api-client-go/v2/api/datadogV2"
+	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -69,6 +71,25 @@ type Clients struct {
 	AppKey       string
 	APIURL       string
 	FeatureFlags *datadogV2.FeatureFlagsApi
+
+	// envMu serialises writes to the same environment across concurrent
+	// resource calls in this provider process. The Datadog allocations
+	// API returns a transient 409 Conflict when two (flag, env) writes
+	// reach it simultaneously for the same env_id; the mutex keeps
+	// terraform apply deterministic at the default parallelism of 10.
+	envMu sync.Map // map[uuid.UUID]*sync.Mutex
+}
+
+// LockEnv acquires the per-environment mutex for envID and returns a
+// release function suitable for `defer`. Callers that mutate
+// (flag, env)-scoped resources (allocation_set, feature_flag_environment)
+// should hold the lock for the duration of the API write to avoid the
+// concurrent-write 409 described on envMu.
+func (c *Clients) LockEnv(envID uuid.UUID) func() {
+	raw, _ := c.envMu.LoadOrStore(envID, &sync.Mutex{})
+	mu := raw.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // Context returns ctx augmented with the Datadog API keys and (optionally)
