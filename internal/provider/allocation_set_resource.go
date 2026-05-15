@@ -613,6 +613,19 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 		return
 	}
 
+	// The API occasionally returns 200 OK with an empty response when the
+	// environment has `require_feature_flag_approval = true`: the PUT is
+	// rejected silently because the change needs human approval. Surface
+	// that case explicitly so users do not interpret it as a provider bug.
+	if len(res.Data) == 0 && len(plan.Allocations) > 0 {
+		diags.AddError(
+			"Allocation write was silently dropped",
+			"PUT to allocations returned 200 OK but no allocations were created. "+
+				approvalHint(ctx, r.clients, flagID, envID),
+		)
+		return
+	}
+
 	plan.ID = types.StringValue(plan.FeatureFlagID.ValueString() + ":" + plan.EnvironmentID.ValueString())
 	mergeAllocationsResponse(plan, res.Data, diags)
 	if diags.HasError() {

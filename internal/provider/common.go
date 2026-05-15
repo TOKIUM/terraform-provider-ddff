@@ -125,6 +125,22 @@ func nullableStringToTF(v datadog.NullableString) types.String {
 	return types.StringValue(*v.Get())
 }
 
+// approvalHint inspects the (flag, env) entry to find out whether the
+// environment requires feature flag approval, and returns a sentence
+// suitable for appending to an error diagnostic. The hint is best-effort:
+// if the lookup fails for any reason we say so plainly rather than
+// pretending to know the answer.
+func approvalHint(ctx context.Context, c *Clients, flagID, envID uuid.UUID) string {
+	raw, err := c.findRawEnvEntry(ctx, flagID, envID)
+	if err != nil {
+		return fmt.Sprintf("Could not verify the environment's approval setting (%s); inspect the environment in the Datadog UI for require_feature_flag_approval.", err.Error())
+	}
+	if approval, _ := raw["require_feature_flag_approval"].(bool); approval {
+		return "The environment has require_feature_flag_approval=true, so allocation changes from the API must go through the Datadog UI approval workflow. Either complete the initial allocation set-up with require_feature_flag_approval=false and re-enable it afterwards, or apply the change through the UI."
+	}
+	return "Approval is disabled on this environment, so the change was not blocked by the approval gate. Re-running the apply may surface a different diagnostic."
+}
+
 // findRawEnvEntry fetches the parent feature flag and locates the env
 // entry inside feature_flag_environments[] matching envID. The lookup
 // is done against the raw JSON map (recovered from UnparsedObject when
