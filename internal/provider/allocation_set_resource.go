@@ -558,6 +558,9 @@ func (r *allocationSetResource) Delete(ctx context.Context, req resource.DeleteR
 		return
 	}
 
+	unlock := r.clients.LockEnv(envID)
+	defer unlock()
+
 	body := datadogV2.OverwriteAllocationsRequest{Data: []datadogV2.AllocationDataRequest{}}
 	_, httpResp, err := r.clients.FeatureFlags.UpdateAllocationsForFeatureFlagInEnvironment(r.clients.Context(ctx), flagID, envID, body)
 	if err := notFoundIfHTTP404(err, httpResp); err != nil && !isNotFound(err) {
@@ -578,6 +581,12 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 	if !ok {
 		return
 	}
+
+	// Serialise concurrent writes to the same environment: the
+	// allocations endpoint returns a transient 409 when two parallel
+	// writes hit the same env_id, even for distinct feature_flag_ids.
+	unlock := r.clients.LockEnv(envID)
+	defer unlock()
 
 	// The Datadog API expects variant_weights to include the variant's
 	// UUID, not just its key. Resolve the (key -> id) mapping by fetching
