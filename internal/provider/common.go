@@ -20,13 +20,26 @@ import (
 // parsing and avoids state churn from format differences.
 const timeFormat = "2006-01-02T15:04:05Z07:00"
 
-// apiErr formats an SDK error along with the HTTP status code when one
-// is available.
+// apiErr formats an SDK error along with the HTTP status code and, when
+// the SDK error carries one, the raw response body. The body is what
+// actually identifies a Datadog failure (e.g. `allocation with this key
+// already exists`) — without it callers only see a bare status code and
+// have to reproduce the call manually to learn what went wrong.
 func apiErr(err error, httpResp *http.Response) string {
-	if httpResp == nil {
-		return err.Error()
+	if err == nil {
+		return ""
 	}
-	return fmt.Sprintf("%s (status %d)", err.Error(), httpResp.StatusCode)
+	msg := err.Error()
+	if httpResp != nil {
+		msg = fmt.Sprintf("%s (status %d)", msg, httpResp.StatusCode)
+	}
+	var genErr datadog.GenericOpenAPIError
+	if errors.As(err, &genErr) {
+		if body := genErr.Body(); len(body) > 0 {
+			msg = fmt.Sprintf("%s: %s", msg, string(body))
+		}
+	}
+	return msg
 }
 
 // errNotFound is returned when a resource was looked up by ID but the
