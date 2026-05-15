@@ -155,7 +155,7 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 						"key": schema.StringAttribute{
-							MarkdownDescription: "Stable, human-readable key for this allocation. Must be unique within the (flag, environment) set.",
+							MarkdownDescription: "Stable, human-readable key for this allocation. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair.",
 							Required:            true,
 						},
 						"name": schema.StringAttribute{

@@ -22,12 +22,18 @@ The Datadog API replaces the entire allocation list for a (flag, environment) pa
 # Allow-list pattern: only customers in the enterprise / professional
 # tiers see the `on` variant; everyone else falls back to the flag's
 # default_variant_key.
+#
+# Note on `key`: the Datadog API enforces uniqueness across the entire
+# workspace, so a bare "tier-allowlist" key would clash the moment you
+# add the same allocation to another (flag, environment) pair. Scope it
+# with the flag name (and environment when reusing across environments)
+# so two allocation_set resources never collide.
 resource "ddff_allocation_set" "new_checkout_prod" {
   feature_flag_id = ddff_feature_flag.new_checkout.id
   environment_id  = data.ddff_environment.production.id
 
   allocation {
-    key  = "tier-allowlist"
+    key  = "new_checkout-prod-tier-allowlist"
     name = "Allowed customer tiers"
     type = "FEATURE_GATE"
 
@@ -60,7 +66,7 @@ resource "ddff_allocation_set" "new_checkout_canary" {
   environment_id  = data.ddff_environment.production.id
 
   allocation {
-    key  = "starter-canary"
+    key  = "new_checkout-prod-starter-canary"
     name = "Starter tier progressive rollout"
     type = "CANARY"
 
@@ -118,7 +124,7 @@ resource "ddff_allocation_set" "new_checkout_canary" {
 
 Required:
 
-- `key` (String) Stable, human-readable key for this allocation. Must be unique within the (flag, environment) set.
+- `key` (String) Stable, human-readable key for this allocation. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair.
 - `name` (String) Display name shown in the Datadog UI.
 
 Optional:
