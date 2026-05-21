@@ -80,3 +80,56 @@ resource "ddff_allocation_set" "new_checkout_canary" {
     }
   }
 }
+
+# Rewinding a progressive rollout. The schedule's runtime state (current
+# step, started_at, exposure ratio) lives only on the Datadog side, so
+# editing rollout_step values cannot reset it. Flip `force_recreate = true`
+# on the affected `allocation` block, run `apply` to destroy + recreate the
+# allocation under the same key, then flip it back to `false` (leaving it
+# `true` recreates the allocation on every subsequent apply).
+#
+# Below is the same resource as `new_checkout_canary` above with the one
+# extra attribute — apply only one of them, not both, since two
+# allocation_set resources for the same (flag, environment) pair overwrite
+# each other on every apply.
+resource "ddff_allocation_set" "new_checkout_canary_rewind" {
+  feature_flag_id = ddff_feature_flag.new_checkout.id
+  environment_id  = data.ddff_environment.production.id
+
+  allocation {
+    key            = "new_checkout-prod-starter-canary"
+    name           = "Starter tier progressive rollout"
+    type           = "CANARY"
+    force_recreate = true # one-shot; flip back to false after apply
+
+    targeting_rule {
+      condition {
+        attribute = "customer_tier"
+        operator  = "EQUALS"
+        value     = ["starter"]
+      }
+    }
+
+    variant_weight {
+      variant_key = "on"
+      value       = 100
+    }
+
+    exposure_schedule {
+      rollout_options {
+        strategy              = "UNIFORM_INTERVALS"
+        autostart             = false
+        selection_interval_ms = 86400000
+      }
+      rollout_step {
+        exposure_ratio = 0.10
+      }
+      rollout_step {
+        exposure_ratio = 0.50
+      }
+      rollout_step {
+        exposure_ratio = 1.0
+      }
+    }
+  }
+}

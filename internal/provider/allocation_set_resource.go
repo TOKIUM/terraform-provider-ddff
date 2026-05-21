@@ -17,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
@@ -30,6 +31,7 @@ var (
 	_ resource.Resource                = (*allocationSetResource)(nil)
 	_ resource.ResourceWithConfigure   = (*allocationSetResource)(nil)
 	_ resource.ResourceWithImportState = (*allocationSetResource)(nil)
+	_ resource.ResourceWithModifyPlan  = (*allocationSetResource)(nil)
 )
 
 func NewAllocationSetResource() resource.Resource {
@@ -53,6 +55,7 @@ type allocationModel struct {
 	Name             types.String           `tfsdk:"name"`
 	Type             types.String           `tfsdk:"type"`
 	OrderPosition    types.Int64            `tfsdk:"order_position"`
+	ForceRecreate    types.Bool             `tfsdk:"force_recreate"`
 	TargetingRules   []targetingRuleModel   `tfsdk:"targeting_rule"`
 	VariantWeights   []variantWeightModel   `tfsdk:"variant_weight"`
 	ExposureSchedule *exposureScheduleModel `tfsdk:"exposure_schedule"`
@@ -177,6 +180,15 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 							PlanModifiers: []planmodifier.Int64{
 								int64planmodifier.UseStateForUnknown(),
 							},
+						},
+						"force_recreate": schema.BoolAttribute{
+							MarkdownDescription: "When `true`, the next `apply` deletes this allocation server-side and recreates it under the same `key`, " +
+								"reissuing the `id`, `order_position`, and (when declared) the entire `exposure_schedule` (schedule id, step ids, `absolute_start_time`). " +
+								"Intended for one-shot operations like rewinding a progressive rollout whose runtime state — current step, start time, exposure ratio — is not tracked in Terraform state and therefore cannot be reset by editing schedule values alone. " +
+								"Flip to `true`, run `apply`, then set back to `false` (or remove the attribute); leaving it `true` recreates the allocation on every subsequent apply.",
+							Optional: true,
+							Computed: true,
+							Default:  booldefault.StaticBool(false),
 						},
 					},
 					Blocks: map[string]schema.Block{
@@ -340,8 +352,11 @@ func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadReque
 // prior state. exposure_schedule is opt-in (block syntax): if the user never
 // declared it for an allocation, the prior state has ExposureSchedule == nil
 // and we drop the value the API returned so the state continues to match the
-// declared config. Allocations are matched by key; missing matches keep the
-// fresh value.
+// declared config. `force_recreate` is a Terraform-only attribute that does
+// not round-trip through the API, so it is copied back from the prior entry
+// (matched by key) to avoid spurious diffs after every refresh.
+// Allocations are matched by key; missing matches keep the fresh value and
+// leave force_recreate at its zero value (null).
 func mergeAllocationsRead(prior, fresh []allocationModel) {
 	priorByKey := make(map[string]*allocationModel, len(prior))
 	for i := range prior {
@@ -349,9 +364,13 @@ func mergeAllocationsRead(prior, fresh []allocationModel) {
 	}
 	for i := range fresh {
 		p, ok := priorByKey[fresh[i].Key.ValueString()]
-		if !ok || p.ExposureSchedule == nil {
+		if !ok {
+			continue
+		}
+		if p.ExposureSchedule == nil {
 			fresh[i].ExposureSchedule = nil
 		}
+		fresh[i].ForceRecreate = p.ForceRecreate
 	}
 }
 
@@ -536,6 +555,53 @@ func nullableInt64(p *int64) types.Int64 {
 	return types.Int64Value(*p)
 }
 
+// ModifyPlan marks the server-assigned attributes of any allocation flagged
+// with `force_recreate = true` as unknown so the plan output reflects the
+// imminent destroy + create. Without this, attribute-level UseStateForUnknown
+// modifiers preserve the prior `id` / `order_position` in plan and the
+// reissue surprises the operator at apply time. Matching is done by `key`
+// (stable across renames within a single plan) rather than list index because
+// reordering or insertion would otherwise misalign state and plan rows.
+func (r *allocationSetResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+		return
+	}
+
+	var plan allocationSetModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	mutated := false
+	for i := range plan.Allocations {
+		a := &plan.Allocations[i]
+		if a.ForceRecreate.IsNull() || a.ForceRecreate.IsUnknown() || !a.ForceRecreate.ValueBool() {
+			continue
+		}
+		a.ID = types.StringUnknown()
+		a.OrderPosition = types.Int64Unknown()
+		if a.ExposureSchedule != nil {
+			a.ExposureSchedule.ID = types.StringUnknown()
+			a.ExposureSchedule.AllocationID = types.StringUnknown()
+			// Each rollout_step row is also re-issued server-side: id and
+			// order_position are Computed-only, so the framework keeps the
+			// prior state value in plan by default; without overriding it
+			// here the apply trips "Provider produced inconsistent result".
+			for j := range a.ExposureSchedule.RolloutSteps {
+				step := &a.ExposureSchedule.RolloutSteps[j]
+				step.ID = types.StringUnknown()
+				step.OrderPosition = types.Int64Unknown()
+			}
+		}
+		mutated = true
+	}
+
+	if mutated {
+		resp.Diagnostics.Append(resp.Plan.Set(ctx, plan)...)
+	}
+}
+
 func (r *allocationSetResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan allocationSetModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -614,7 +680,34 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 		return
 	}
 
-	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID, priorKeyToID(prior))
+	// Free the keys of any allocations flagged with force_recreate before
+	// the main write. Datadog enforces workspace-global uniqueness on
+	// `key`, so a single PUT cannot atomically retire the existing row
+	// and create a new row under the same key — the uniqueness check
+	// fires while the old row is still alive and returns 409. Drop those
+	// keys first so the main PUT below can recreate them cleanly.
+	if isUpdate && len(prior) > 0 {
+		recreate := forceRecreateKeys(plan.Allocations)
+		if len(recreate) > 0 {
+			retained := make([]allocationModel, 0, len(plan.Allocations))
+			for _, a := range plan.Allocations {
+				if _, drop := recreate[a.Key.ValueString()]; !drop {
+					retained = append(retained, a)
+				}
+			}
+			prelimBody, prelimDiags := buildOverwriteBody(ctx, retained, variantKeyToID, priorKeyToID(prior, retained))
+			diags.Append(prelimDiags...)
+			if diags.HasError() {
+				return
+			}
+			if _, httpResp, err := r.clients.FeatureFlags.UpdateAllocationsForFeatureFlagInEnvironment(r.clients.Context(ctx), flagID, envID, prelimBody); err != nil {
+				diags.AddError("Failed to clear allocations before force_recreate", apiErr(err, httpResp))
+				return
+			}
+		}
+	}
+
+	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID, priorKeyToID(prior, plan.Allocations))
 	diags.Append(buildDiags...)
 	if diags.HasError() {
 		return
@@ -683,16 +776,37 @@ func (r *allocationSetResource) variantKeyToID(ctx context.Context, flagID uuid.
 	return out, diags
 }
 
+// forceRecreateKeys returns the set of allocation keys whose plan entry
+// requests a server-side destroy + recreate via `force_recreate = true`.
+func forceRecreateKeys(plan []allocationModel) map[string]struct{} {
+	out := make(map[string]struct{}, len(plan))
+	for _, a := range plan {
+		if !a.ForceRecreate.IsNull() && !a.ForceRecreate.IsUnknown() && a.ForceRecreate.ValueBool() {
+			out[a.Key.ValueString()] = struct{}{}
+		}
+	}
+	return out
+}
+
 // priorKeyToID projects the previous state's allocation list into a
 // (key -> server UUID) map used by buildOverwriteBody to decide which
 // planned allocations should be sent as in-place updates and which as
 // fresh creates. Returns nil when there is no prior state (Create).
-func priorKeyToID(prior []allocationModel) map[string]uuid.UUID {
+//
+// Allocations whose plan entry sets `force_recreate = true` are excluded
+// from the map so the API receives them without an Id and creates a fresh
+// row (new UUID, fresh exposure_schedule). Matching is done by `key`.
+func priorKeyToID(prior []allocationModel, plan []allocationModel) map[string]uuid.UUID {
 	if len(prior) == 0 {
 		return nil
 	}
+	recreate := forceRecreateKeys(plan)
 	out := make(map[string]uuid.UUID, len(prior))
 	for _, a := range prior {
+		key := a.Key.ValueString()
+		if _, skip := recreate[key]; skip {
+			continue
+		}
 		if a.ID.IsNull() || a.ID.IsUnknown() || a.ID.ValueString() == "" {
 			continue
 		}
@@ -700,7 +814,7 @@ func priorKeyToID(prior []allocationModel) map[string]uuid.UUID {
 		if err != nil {
 			continue
 		}
-		out[a.Key.ValueString()] = id
+		out[key] = id
 	}
 	return out
 }
