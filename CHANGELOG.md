@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.3](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.2...v0.1.3) (2026-05-21)
+
+
+### Features
+
+* **allocation_set:** add force_recreate for rewinding rollouts ([fc00845](https://github.com/TOKIUM/terraform-provider-ddff/commit/fc008451e279c085408aad8c4a0fb3732bd775a7))
+* **allocation_set:** add force_recreate for rewinding rollouts ([afdc3ea](https://github.com/TOKIUM/terraform-provider-ddff/commit/afdc3eac0a2e4c9bb829892d8031c5507c989d69))
+* **allocation_set:** rotate actual_key on force_recreate to bust schedule history ([bf9f6cd](https://github.com/TOKIUM/terraform-provider-ddff/commit/bf9f6cd3028ba6233cc14cd060d1156b538ce945))
+* **allocation_set:** rotate actual_key on force_recreate to bust schedule history ([2154eac](https://github.com/TOKIUM/terraform-provider-ddff/commit/2154eac70453841961eab68a8bea14a4e5ee0efc))
+
 ## [0.1.2](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.1...v0.1.2) (2026-05-15)
 
 
