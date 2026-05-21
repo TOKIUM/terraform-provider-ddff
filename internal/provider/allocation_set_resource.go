@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -52,6 +54,7 @@ type allocationSetModel struct {
 type allocationModel struct {
 	ID               types.String           `tfsdk:"id"`
 	Key              types.String           `tfsdk:"key"`
+	ActualKey        types.String           `tfsdk:"actual_key"`
 	Name             types.String           `tfsdk:"name"`
 	Type             types.String           `tfsdk:"type"`
 	OrderPosition    types.Int64            `tfsdk:"order_position"`
@@ -158,8 +161,15 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 						"key": schema.StringAttribute{
-							MarkdownDescription: "Stable, human-readable key for this allocation. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair.",
+							MarkdownDescription: "Stable, human-readable key for this allocation, used both as the logical identifier in Terraform state and as the prefix of the server-side key. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair. The server-side key is exposed as the computed `actual_key`; when `force_recreate = true` it gets a rotating suffix appended so the schedule's runtime state (started_at, current step) is freshly re-issued.",
 							Required:            true,
+						},
+						"actual_key": schema.StringAttribute{
+							MarkdownDescription: "The key the provider sends to the Datadog API. Equal to `key` for allocations that have never been recreated, and equal to `{key}-r{8 hex}` for allocations that have been through at least one `force_recreate` cycle. Visible in the Datadog UI as the allocation's key.",
+							Computed:            true,
+							PlanModifiers: []planmodifier.String{
+								stringplanmodifier.UseStateForUnknown(),
+							},
 						},
 						"name": schema.StringAttribute{
 							MarkdownDescription: "Display name shown in the Datadog UI.",
@@ -182,10 +192,12 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 							},
 						},
 						"force_recreate": schema.BoolAttribute{
-							MarkdownDescription: "When `true`, the next `apply` deletes this allocation server-side and recreates it under the same `key`, " +
-								"reissuing the `id`, `order_position`, and (when declared) the entire `exposure_schedule` (schedule id, step ids, `absolute_start_time`). " +
-								"Intended for one-shot operations like rewinding a progressive rollout whose runtime state — current step, start time, exposure ratio — is not tracked in Terraform state and therefore cannot be reset by editing schedule values alone. " +
-								"Flip to `true`, run `apply`, then set back to `false` (or remove the attribute); leaving it `true` recreates the allocation on every subsequent apply.",
+							MarkdownDescription: "When `true`, the next `apply` rotates the server-side `actual_key` to `{key}-r{8 hex}`, " +
+								"which makes Datadog treat the allocation as a brand-new row: the `id`, `order_position`, `exposure_schedule` (schedule id, step ids), " +
+								"and the schedule's runtime state (`absolute_start_time`, current step, exposure ratio) are all freshly issued. " +
+								"Intended for rewinding a progressive rollout whose runtime state lives only on the Datadog side and cannot be reset by editing schedule values alone. " +
+								"Flip to `true`, run `apply`, then set back to `false` (or remove the attribute); leaving it `true` rotates the `actual_key` on every subsequent apply. " +
+								"Note: the `actual_key` retains the suffix after the rotation, so the allocation visible in the Datadog UI ends up named `{key}-r{8 hex}` rather than the bare `key`.",
 							Optional: true,
 							Computed: true,
 							Default:  booldefault.StaticBool(false),
@@ -349,28 +361,35 @@ func (r *allocationSetResource) Read(ctx context.Context, req resource.ReadReque
 }
 
 // mergeAllocationsRead reconciles fresh server-side allocations with the
-// prior state. exposure_schedule is opt-in (block syntax): if the user never
-// declared it for an allocation, the prior state has ExposureSchedule == nil
-// and we drop the value the API returned so the state continues to match the
-// declared config. `force_recreate` is a Terraform-only attribute that does
-// not round-trip through the API, so it is copied back from the prior entry
-// (matched by key) to avoid spurious diffs after every refresh.
-// Allocations are matched by key; missing matches keep the fresh value and
-// leave force_recreate at its zero value (null).
+// prior state. Matching is done by `actual_key` (the key actually written
+// to the API), so that `force_recreate` rotations — which change actual_key
+// without changing the user-declared logical `key` — line up correctly.
+//
+// For each matched pair, the user-declared logical `key`, `force_recreate`,
+// and the nil-ness of `exposure_schedule` (block syntax is opt-in) are
+// copied back from the prior entry: none of these round-trip through the
+// API and would otherwise produce spurious diffs after every refresh.
+// Unmatched fresh allocations keep `key` defaulted to their `actual_key`
+// (set in rawAllocationToModel) and `force_recreate` at zero value (null).
 func mergeAllocationsRead(prior, fresh []allocationModel) {
-	priorByKey := make(map[string]*allocationModel, len(prior))
+	priorByActualKey := make(map[string]*allocationModel, len(prior))
 	for i := range prior {
-		priorByKey[prior[i].Key.ValueString()] = &prior[i]
+		ak := prior[i].ActualKey.ValueString()
+		if ak == "" {
+			ak = prior[i].Key.ValueString() // legacy state before actual_key existed
+		}
+		priorByActualKey[ak] = &prior[i]
 	}
 	for i := range fresh {
-		p, ok := priorByKey[fresh[i].Key.ValueString()]
+		p, ok := priorByActualKey[fresh[i].ActualKey.ValueString()]
 		if !ok {
 			continue
 		}
+		fresh[i].Key = p.Key
+		fresh[i].ForceRecreate = p.ForceRecreate
 		if p.ExposureSchedule == nil {
 			fresh[i].ExposureSchedule = nil
 		}
-		fresh[i].ForceRecreate = p.ForceRecreate
 	}
 }
 
@@ -468,7 +487,8 @@ type rawRolloutStep struct {
 func rawAllocationToModel(ctx context.Context, a rawAllocation) (allocationModel, error) {
 	m := allocationModel{
 		ID:            types.StringValue(a.ID),
-		Key:           types.StringValue(a.Key),
+		Key:           types.StringValue(a.Key), // tentative; restored from prior state in mergeAllocationsRead
+		ActualKey:     types.StringValue(a.Key),
 		Name:          types.StringValue(a.Name),
 		Type:          types.StringValue(a.Type),
 		OrderPosition: types.Int64Value(a.OrderPosition),
@@ -580,10 +600,25 @@ func (r *allocationSetResource) ModifyPlan(ctx context.Context, req resource.Mod
 			continue
 		}
 		a.ID = types.StringUnknown()
+		a.ActualKey = types.StringUnknown()
 		a.OrderPosition = types.Int64Unknown()
 		if a.ExposureSchedule != nil {
 			a.ExposureSchedule.ID = types.StringUnknown()
 			a.ExposureSchedule.AllocationID = types.StringUnknown()
+			// absolute_start_time resets when the allocation is created under
+			// a fresh actual_key (Datadog persists schedule runtime state per
+			// (flag, env, actual_key) tuple), so mark it unknown even if the
+			// user did not configure it explicitly.
+			a.ExposureSchedule.AbsoluteStartTime = types.StringUnknown()
+			// Each rollout_step row is also re-issued server-side: id and
+			// order_position are Computed-only, so the framework keeps the
+			// prior state value in plan by default; without overriding it
+			// here the apply trips "Provider produced inconsistent result".
+			for j := range a.ExposureSchedule.RolloutSteps {
+				step := &a.ExposureSchedule.RolloutSteps[j]
+				step.ID = types.StringUnknown()
+				step.OrderPosition = types.Int64Unknown()
+			}
 		}
 		mutated = true
 	}
@@ -671,34 +706,42 @@ func (r *allocationSetResource) putAndReconcile(ctx context.Context, plan *alloc
 		return
 	}
 
-	// Free the keys of any allocations flagged with force_recreate before
-	// the main write. Datadog enforces workspace-global uniqueness on
-	// `key`, so a single PUT cannot atomically retire the existing row
-	// and create a new row under the same key — the uniqueness check
-	// fires while the old row is still alive and returns 409. Drop those
-	// keys first so the main PUT below can recreate them cleanly.
-	if isUpdate && len(prior) > 0 {
-		recreate := forceRecreateKeys(plan.Allocations)
-		if len(recreate) > 0 {
-			retained := make([]allocationModel, 0, len(plan.Allocations))
-			for _, a := range plan.Allocations {
-				if _, drop := recreate[a.Key.ValueString()]; !drop {
-					retained = append(retained, a)
-				}
-			}
-			prelimBody, prelimDiags := buildOverwriteBody(ctx, retained, variantKeyToID, priorKeyToID(prior, retained))
-			diags.Append(prelimDiags...)
-			if diags.HasError() {
+	// Derive each planned allocation's server-side `actual_key`:
+	//   * fresh allocation (no prior state for this logical key): actual_key = key
+	//   * existing allocation with `force_recreate = true`: actual_key gets a
+	//     fresh `-r{8 hex}` suffix appended to the logical key, making the
+	//     server treat it as a brand-new row (and dropping the old key's
+	//     schedule history, which Datadog persists per (flag, env, key)).
+	//   * existing allocation otherwise: actual_key is carried over from
+	//     state so subsequent applies do not churn the server key.
+	priorByLogicalKey := make(map[string]*allocationModel, len(prior))
+	for i := range prior {
+		priorByLogicalKey[prior[i].Key.ValueString()] = &prior[i]
+	}
+	for i := range plan.Allocations {
+		a := &plan.Allocations[i]
+		s, hasPrior := priorByLogicalKey[a.Key.ValueString()]
+		forceRecreate := !a.ForceRecreate.IsNull() && !a.ForceRecreate.IsUnknown() && a.ForceRecreate.ValueBool()
+		switch {
+		case !hasPrior:
+			a.ActualKey = a.Key
+		case forceRecreate:
+			suffix, sErr := randomKeySuffix()
+			if sErr != nil {
+				diags.AddError("Failed to generate force_recreate suffix", sErr.Error())
 				return
 			}
-			if _, httpResp, err := r.clients.FeatureFlags.UpdateAllocationsForFeatureFlagInEnvironment(r.clients.Context(ctx), flagID, envID, prelimBody); err != nil {
-				diags.AddError("Failed to clear allocations before force_recreate", apiErr(err, httpResp))
-				return
+			a.ActualKey = types.StringValue(a.Key.ValueString() + "-r" + suffix)
+		default:
+			if s.ActualKey.IsNull() || s.ActualKey.ValueString() == "" {
+				a.ActualKey = a.Key // legacy state before actual_key existed
+			} else {
+				a.ActualKey = s.ActualKey
 			}
 		}
 	}
 
-	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID, priorKeyToID(prior, plan.Allocations))
+	body, buildDiags := buildOverwriteBody(ctx, plan.Allocations, variantKeyToID, priorActualKeyToID(prior))
 	diags.Append(buildDiags...)
 	if diags.HasError() {
 		return
@@ -767,36 +810,35 @@ func (r *allocationSetResource) variantKeyToID(ctx context.Context, flagID uuid.
 	return out, diags
 }
 
-// forceRecreateKeys returns the set of allocation keys whose plan entry
-// requests a server-side destroy + recreate via `force_recreate = true`.
-func forceRecreateKeys(plan []allocationModel) map[string]struct{} {
-	out := make(map[string]struct{}, len(plan))
-	for _, a := range plan {
-		if !a.ForceRecreate.IsNull() && !a.ForceRecreate.IsUnknown() && a.ForceRecreate.ValueBool() {
-			out[a.Key.ValueString()] = struct{}{}
-		}
+// randomKeySuffix returns 8 hex characters used to rotate the server-side
+// allocation key on `force_recreate`. Each apply generates a fresh suffix
+// so Datadog treats the recreated allocation as a brand-new row.
+func randomKeySuffix() (string, error) {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
 	}
-	return out
+	return hex.EncodeToString(buf), nil
 }
 
-// priorKeyToID projects the previous state's allocation list into a
-// (key -> server UUID) map used by buildOverwriteBody to decide which
-// planned allocations should be sent as in-place updates and which as
-// fresh creates. Returns nil when there is no prior state (Create).
+// priorActualKeyToID projects the previous state's allocation list into an
+// (actual_key -> server UUID) map used by buildOverwriteBody to decide
+// which planned allocations should be sent as in-place updates and which
+// as fresh creates. Returns nil when there is no prior state (Create).
 //
-// Allocations whose plan entry sets `force_recreate = true` are excluded
-// from the map so the API receives them without an Id and creates a fresh
-// row (new UUID, fresh exposure_schedule). Matching is done by `key`.
-func priorKeyToID(prior []allocationModel, plan []allocationModel) map[string]uuid.UUID {
+// Matching is done by `actual_key` (the key the provider actually sends to
+// the API), so a `force_recreate` rotation — which changes the actual_key
+// — naturally falls into the "fresh create" branch because the new
+// rotated key has no entry here.
+func priorActualKeyToID(prior []allocationModel) map[string]uuid.UUID {
 	if len(prior) == 0 {
 		return nil
 	}
-	recreate := forceRecreateKeys(plan)
 	out := make(map[string]uuid.UUID, len(prior))
 	for _, a := range prior {
-		key := a.Key.ValueString()
-		if _, skip := recreate[key]; skip {
-			continue
+		ak := a.ActualKey.ValueString()
+		if ak == "" {
+			ak = a.Key.ValueString() // legacy state before actual_key existed
 		}
 		if a.ID.IsNull() || a.ID.IsUnknown() || a.ID.ValueString() == "" {
 			continue
@@ -805,19 +847,20 @@ func priorKeyToID(prior []allocationModel, plan []allocationModel) map[string]uu
 		if err != nil {
 			continue
 		}
-		out[key] = id
+		out[ak] = id
 	}
 	return out
 }
 
 // buildOverwriteBody converts the planned allocation list into the
-// OverwriteAllocationsRequest expected by the SDK. priorKeyToID is the
-// previous state's (key -> UUID) projection: an entry there means
-// "update this allocation in place"; its absence means "create fresh".
-// Renaming a key drops it from priorKeyToID, which is what makes
-// key-rename plans succeed (the API silently ignores key changes when
-// the existing UUID is provided alongside).
-func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKeyToID map[string]uuid.UUID, priorKeyToID map[string]uuid.UUID) (datadogV2.OverwriteAllocationsRequest, diag.Diagnostics) {
+// OverwriteAllocationsRequest expected by the SDK. The API request uses
+// `actual_key` (the rotated server-side key) as the allocation key, not the
+// user-declared logical `key`. priorActualKeyToID maps each prior actual_key
+// to its server UUID: an entry there means "update this allocation in
+// place"; its absence means "create fresh" (which also covers the
+// `force_recreate` rotation case, since the rotated actual_key has no
+// entry in the prior projection).
+func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKeyToID map[string]uuid.UUID, priorActualKeyToID map[string]uuid.UUID) (datadogV2.OverwriteAllocationsRequest, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	body := datadogV2.OverwriteAllocationsRequest{
 		Data: make([]datadogV2.AllocationDataRequest, 0, len(allocs)),
@@ -835,8 +878,12 @@ func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKe
 			return body, diags
 		}
 
+		actualKey := a.ActualKey.ValueString()
+		if actualKey == "" {
+			actualKey = a.Key.ValueString()
+		}
 		attrs := datadogV2.UpsertAllocationRequest{
-			Key:            a.Key.ValueString(),
+			Key:            actualKey,
 			Name:           a.Name.ValueString(),
 			Type:           datadogV2.AllocationType(a.Type.ValueString()),
 			TargetingRules: targetingRules,
@@ -850,11 +897,7 @@ func buildOverwriteBody(ctx context.Context, allocs []allocationModel, variantKe
 			}
 			attrs.ExposureSchedule = es
 		}
-		// Pass the existing allocation's UUID through only when the plan
-		// key matches a prior-state key. The API silently keeps the old
-		// key when an UUID is supplied alongside a new one, so a rename
-		// must look like a fresh create from the API's point of view.
-		if id, ok := priorKeyToID[a.Key.ValueString()]; ok {
+		if id, ok := priorActualKeyToID[actualKey]; ok {
 			idCopy := id
 			attrs.Id = &idCopy
 		}
@@ -1000,30 +1043,36 @@ func variantKeyList(m map[string]uuid.UUID) string {
 
 // mergeAllocationsResponse takes the typed list returned by the PUT response
 // and fills in computed attributes (id, order_position, type when defaulted)
-// on the matching plan allocations, looked up by their stable `key`.
+// on the matching plan allocations, looked up by `actual_key` (the key the
+// provider sent to the API; for `force_recreate` rotations this differs
+// from the user-declared logical `key`).
 //
 // Mismatches between the plan and the response are surfaced as errors so
-// we never silently drop server-side state: a plan key without a response
-// indicates the API rejected or renamed the allocation, and an extra
-// response key indicates the server kept an allocation we did not declare.
+// we never silently drop server-side state: a plan actual_key without a
+// response indicates the API rejected or renamed the allocation, and an
+// extra response actual_key indicates the server kept an allocation we
+// did not declare.
 func mergeAllocationsResponse(plan *allocationSetModel, data []datadogV2.AllocationDataResponse, diags *diag.Diagnostics) {
-	byKey := make(map[string]datadogV2.AllocationDataResponse, len(data))
+	byActualKey := make(map[string]datadogV2.AllocationDataResponse, len(data))
 	for _, a := range data {
-		byKey[a.Attributes.Key] = a
+		byActualKey[a.Attributes.Key] = a
 	}
 
 	seen := make(map[string]struct{}, len(plan.Allocations))
 	for i := range plan.Allocations {
-		key := plan.Allocations[i].Key.ValueString()
-		resp, ok := byKey[key]
+		actualKey := plan.Allocations[i].ActualKey.ValueString()
+		if actualKey == "" {
+			actualKey = plan.Allocations[i].Key.ValueString()
+		}
+		resp, ok := byActualKey[actualKey]
 		if !ok {
 			diags.AddError(
 				"Allocation missing from API response",
-				fmt.Sprintf("PUT returned no allocation with key %q for this (flag, environment); the API may have rejected or renamed it.", key),
+				fmt.Sprintf("PUT returned no allocation with key %q for this (flag, environment); the API may have rejected or renamed it.", actualKey),
 			)
 			return
 		}
-		seen[key] = struct{}{}
+		seen[actualKey] = struct{}{}
 		plan.Allocations[i].ID = types.StringValue(resp.Id.String())
 		plan.Allocations[i].OrderPosition = types.Int64Value(resp.Attributes.OrderPosition)
 		if plan.Allocations[i].Type.IsNull() || plan.Allocations[i].Type.IsUnknown() {
@@ -1032,7 +1081,7 @@ func mergeAllocationsResponse(plan *allocationSetModel, data []datadogV2.Allocat
 	}
 
 	extra := make([]string, 0)
-	for key := range byKey {
+	for key := range byActualKey {
 		if _, ok := seen[key]; !ok {
 			extra = append(extra, key)
 		}

@@ -81,17 +81,25 @@ resource "ddff_allocation_set" "new_checkout_canary" {
   }
 }
 
-# Rewinding a progressive rollout. The schedule's runtime state (current
-# step, started_at, exposure ratio) lives only on the Datadog side, so
-# editing rollout_step values cannot reset it. Flip `force_recreate = true`
-# on the affected `allocation` block, run `apply` to destroy + recreate the
-# allocation under the same key, then flip it back to `false` (leaving it
-# `true` recreates the allocation on every subsequent apply).
+# Rewinding a progressive rollout. The schedule's runtime state
+# (started_at, current step, exposure ratio) lives only on the Datadog side
+# and is keyed by the server-side allocation key, so editing rollout_step
+# values cannot reset it. Flip `force_recreate = true` on the affected
+# `allocation` block to rotate the computed `actual_key` to
+# `{key}-r{8 hex}`, which makes Datadog treat the next apply as a fresh
+# allocation and re-issue `absolute_start_time = null`. Flip it back to
+# `false` (or remove the attribute) after apply; leaving it `true` rotates
+# `actual_key` on every subsequent apply.
 #
-# Below is the same resource as `new_checkout_canary` above with the one
-# extra attribute — apply only one of them, not both, since two
-# allocation_set resources for the same (flag, environment) pair overwrite
-# each other on every apply.
+# The user-declared `key` stays stable across rotations, so the rest of
+# the configuration (targeting_rule, variant_weight, schedule) is
+# preserved on every recreate. The Datadog UI exposes the rotated
+# `actual_key` (e.g. `new_checkout-prod-starter-canary-rab12cd34`) as the
+# allocation's visible key.
+#
+# Apply only one of `new_checkout_canary` / `new_checkout_canary_rewind`
+# at a time, not both — two allocation_set resources for the same
+# (flag, environment) pair overwrite each other on every apply.
 resource "ddff_allocation_set" "new_checkout_canary_rewind" {
   feature_flag_id = ddff_feature_flag.new_checkout.id
   environment_id  = data.ddff_environment.production.id
