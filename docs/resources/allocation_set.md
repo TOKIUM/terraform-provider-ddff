@@ -102,17 +102,25 @@ resource "ddff_allocation_set" "new_checkout_canary" {
   }
 }
 
-# Rewinding a progressive rollout. The schedule's runtime state (current
-# step, started_at, exposure ratio) lives only on the Datadog side, so
-# editing rollout_step values cannot reset it. Flip `force_recreate = true`
-# on the affected `allocation` block, run `apply` to destroy + recreate the
-# allocation under the same key, then flip it back to `false` (leaving it
-# `true` recreates the allocation on every subsequent apply).
+# Rewinding a progressive rollout. The schedule's runtime state
+# (started_at, current step, exposure ratio) lives only on the Datadog side
+# and is keyed by the server-side allocation key, so editing rollout_step
+# values cannot reset it. Flip `force_recreate = true` on the affected
+# `allocation` block to rotate the computed `actual_key` to
+# `{key}-r{8 hex}`, which makes Datadog treat the next apply as a fresh
+# allocation and re-issue `absolute_start_time = null`. Flip it back to
+# `false` (or remove the attribute) after apply; leaving it `true` rotates
+# `actual_key` on every subsequent apply.
 #
-# Below is the same resource as `new_checkout_canary` above with the one
-# extra attribute — apply only one of them, not both, since two
-# allocation_set resources for the same (flag, environment) pair overwrite
-# each other on every apply.
+# The user-declared `key` stays stable across rotations, so the rest of
+# the configuration (targeting_rule, variant_weight, schedule) is
+# preserved on every recreate. The Datadog UI exposes the rotated
+# `actual_key` (e.g. `new_checkout-prod-starter-canary-rab12cd34`) as the
+# allocation's visible key.
+#
+# Apply only one of `new_checkout_canary` / `new_checkout_canary_rewind`
+# at a time, not both — two allocation_set resources for the same
+# (flag, environment) pair overwrite each other on every apply.
 resource "ddff_allocation_set" "new_checkout_canary_rewind" {
   feature_flag_id = ddff_feature_flag.new_checkout.id
   environment_id  = data.ddff_environment.production.id
@@ -177,19 +185,20 @@ resource "ddff_allocation_set" "new_checkout_canary_rewind" {
 
 Required:
 
-- `key` (String) Stable, human-readable key for this allocation. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair.
+- `key` (String) Stable, human-readable key for this allocation, used both as the logical identifier in Terraform state and as the prefix of the server-side key. The Datadog API enforces uniqueness across the entire workspace (not just within the (flag, environment) set), so include enough scope — typically the environment name and/or the flag's product slug — to avoid `409 Conflict: allocation with this key already exists` when adding the same allocation to a second (flag, environment) pair. The server-side key is exposed as the computed `actual_key`; when `force_recreate = true` it gets a rotating suffix appended so the schedule's runtime state (started_at, current step) is freshly re-issued.
 - `name` (String) Display name shown in the Datadog UI.
 
 Optional:
 
 - `exposure_schedule` (Block, Optional) Progressive (traffic exposure) rollout schedule attached to this allocation. Declare the block to manage rollout_options and rollout_steps via Terraform; omit it to leave drift detection off for this allocation. Server-assigned ids (schedule id, step ids) and computed fields are refreshed on every write. (see [below for nested schema](#nestedblock--allocation--exposure_schedule))
-- `force_recreate` (Boolean) When `true`, the next `apply` deletes this allocation server-side and recreates it under the same `key`, reissuing the `id`, `order_position`, and (when declared) the entire `exposure_schedule` (schedule id, step ids, `absolute_start_time`). Intended for one-shot operations like rewinding a progressive rollout whose runtime state — current step, start time, exposure ratio — is not tracked in Terraform state and therefore cannot be reset by editing schedule values alone. Flip to `true`, run `apply`, then set back to `false` (or remove the attribute); leaving it `true` recreates the allocation on every subsequent apply.
+- `force_recreate` (Boolean) When `true`, the next `apply` rotates the server-side `actual_key` to `{key}-r{8 hex}`, which makes Datadog treat the allocation as a brand-new row: the `id`, `order_position`, `exposure_schedule` (schedule id, step ids), and the schedule's runtime state (`absolute_start_time`, current step, exposure ratio) are all freshly issued. Intended for rewinding a progressive rollout whose runtime state lives only on the Datadog side and cannot be reset by editing schedule values alone. Flip to `true`, run `apply`, then set back to `false` (or remove the attribute); leaving it `true` rotates the `actual_key` on every subsequent apply. Note: the `actual_key` retains the suffix after the rotation, so the allocation visible in the Datadog UI ends up named `{key}-r{8 hex}` rather than the bare `key`.
 - `targeting_rule` (Block List) Conjunction of conditions that determines whether this allocation applies to the evaluation context. All conditions inside one targeting_rule must match (AND); multiple targeting_rule blocks act as alternatives (OR). (see [below for nested schema](#nestedblock--allocation--targeting_rule))
 - `type` (String) Allocation type. `FEATURE_GATE` for permanent / boolean-style rollouts, `CANARY` for time-bounded progressive rollouts. Defaults to `FEATURE_GATE`.
 - `variant_weight` (Block List) Probability distribution over variants when this allocation matches. The weights are interpreted as percentages and are expected to sum to 100. (see [below for nested schema](#nestedblock--allocation--variant_weight))
 
 Read-Only:
 
+- `actual_key` (String) The key the provider sends to the Datadog API. Equal to `key` for allocations that have never been recreated, and equal to `{key}-r{8 hex}` for allocations that have been through at least one `force_recreate` cycle. Visible in the Datadog UI as the allocation's key.
 - `id` (String) UUID assigned by the API on create.
 - `order_position` (Number) Server-assigned evaluation order within the environment, derived from the declaration order in this block list.
 
