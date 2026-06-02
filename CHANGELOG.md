@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.4](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.3...v0.1.4) (2026-06-02)
+
+
+### Bug Fixes
+
+* **feature_flag:** variants を ListNestedBlock から SetNestedBlock に変更 ([65aa187](https://github.com/TOKIUM/terraform-provider-ddff/commit/65aa187d0d688c9c8077db38bc5c9023234f96df))
+* **feature_flag:** variants を ListNestedBlock から SetNestedBlock に変更 ([a297f56](https://github.com/TOKIUM/terraform-provider-ddff/commit/a297f56404ec02bb7407be209f90ec7c56f099b8))
+
+
+### Documentation
+
+* **feature_flag:** make docs で variants の型を Block Set に更新 ([f70edc3](https://github.com/TOKIUM/terraform-provider-ddff/commit/f70edc3b4ca06d409d469d35bd71bbcd9767cb43))
+
 ## [0.1.3](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.2...v0.1.3) (2026-05-21)
 
 
