@@ -114,8 +114,8 @@ func (r *featureFlagResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 		},
 		Blocks: map[string]schema.Block{
-			"variants": schema.ListNestedBlock{
-				MarkdownDescription: "Variants the flag can resolve to. The order is preserved.",
+			"variants": schema.SetNestedBlock{
+				MarkdownDescription: "Variants the flag can resolve to.",
 				NestedObject: schema.NestedBlockObject{
 					Attributes: map[string]schema.Attribute{
 						"key": schema.StringAttribute{
