@@ -48,7 +48,7 @@ resource "ddff_feature_flag" "new_checkout" {
 
 - `default_variant_key` (String) Variant key returned when no rule matches. Must match one of the declared variants.
 - `json_schema` (String) JSON schema used to validate variant values when `value_type` is `JSON`. Compared by JSON semantic equality so server-side reformatting (whitespace, key order) is not treated as drift.
-- `variants` (Block List) Variants the flag can resolve to. The order is preserved. (see [below for nested schema](#nestedblock--variants))
+- `variants` (Block Set) Variants the flag can resolve to. (see [below for nested schema](#nestedblock--variants))
 
 ### Read-Only
 
