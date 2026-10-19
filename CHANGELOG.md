@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.4...v0.1.5) (2026-10-19)
+
+
+### Dependencies
+
+* bump golang.org/x/crypto, golang.org/x/net and google.golang.org/grpc ([6c2cb56](https://github.com/TOKIUM/terraform-provider-ddff/commit/6c2cb56280def6a342733704767543c319bf07cd))
+
 ## [0.1.4](https://github.com/TOKIUM/terraform-provider-ddff/compare/v0.1.3...v0.1.4) (2026-06-02)
 
 
