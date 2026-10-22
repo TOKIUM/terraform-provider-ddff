@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/terraform-plugin-framework-validators/float64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/setvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -277,7 +278,7 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 								},
 							},
 						},
-						"variant_weight": schema.ListNestedBlock{
+						"variant_weight": schema.SetNestedBlock{
 							MarkdownDescription: "Probability distribution over variants when this allocation matches. The weights are interpreted as percentages and are expected to sum to 100.",
 							NestedObject: schema.NestedBlockObject{
 								Attributes: map[string]schema.Attribute{
@@ -294,8 +295,8 @@ func (r *allocationSetResource) Schema(_ context.Context, _ resource.SchemaReque
 									},
 								},
 							},
-							Validators: []validator.List{
-								listvalidator.SizeAtLeast(1),
+							Validators: []validator.Set{
+								setvalidator.SizeAtLeast(1),
 							},
 						},
 					},
